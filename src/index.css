@@ -1,0 +1,241 @@
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  color-scheme: dark;
+  color: #ffffff;
+  background-color: #000000;
+}
+body {
+  margin: 0;
+  display: grid;
+  place-items: center;
+  min-width: 320px;
+  min-height: 100vh;
+  position: relative;
+  background-color: #000000;
+}
+.app {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 2rem;
+  text-align: left;
+  position: relative;
+  z-index: 1;
+}
+h1 {
+  font-size: 3.2em;
+  line-height: 1.1;
+  color: #ffffff;
+}
+code {
+  background-color: #1a1a1a;
+  padding: 0.2em 0.4em;
+  border-radius: 0.3em;
+  font-family: monospace;
+  color: #ffffff;
+}
+/* Tabs */
+.tabs-container {
+  width: 100%;
+  margin-top: 2rem;
+}
+
+.tabs-header {
+  display: flex;
+  gap: 0.5rem;
+  border-bottom: 2px solid #333333;
+  margin-bottom: 2rem;
+}
+
+.tab-button {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: all 0.2s;
+}
+
+.tab-button:hover {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.tab-button.active {
+  color: #ffffff;
+  border-bottom-color: #ffffff;
+}
+
+.tabs-content {
+  width: 100%;
+}
+
+/* Streamer and Presenter containers */
+.streamer-container,
+.presenter-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.instructions {
+  background: #1a1a1a;
+  padding: 1.5rem;
+  border-radius: 12px;
+  border: 2px solid #333333;
+  color: #ffffff;
+}
+
+.instructions ol {
+  margin: 0;
+  padding-left: 1.5rem;
+}
+
+.instructions li {
+  margin: 0.5rem 0;
+  line-height: 1.6;
+  color: #ffffff;
+}
+
+.instructions b {
+  color: #ffffff;
+  font-weight: 600;
+}
+
+/* Controls */
+.controls-row {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.action-button {
+  background: #ffffff;
+  color: #000000;
+  border: 0;
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.action-button:hover:not(:disabled) {
+  background: #e0e0e0;
+  transform: translateY(-1px);
+}
+
+.action-button:disabled {
+  background: #333333;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: not-allowed;
+}
+
+/* Connection status */
+.connection-status {
+  padding: 0.75rem 1rem;
+  background: #1a1a1a;
+  border-radius: 8px;
+  border: 2px solid #333333;
+  font-size: 0.9rem;
+  color: #ffffff;
+}
+
+.connection-status span {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.status-connected {
+  color: #4ade80;
+}
+
+.status-connecting {
+  color: #fbbf24;
+}
+
+.status-disconnected,
+.status-failed,
+.status-closed {
+  color: #f87171;
+}
+
+/* Video sections */
+.video-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.video-section h3 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.video-player {
+  width: 100%;
+  max-width: 100%;
+  background: #000000;
+  border-radius: 12px;
+  border: 2px solid #333333;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+}
+
+/* SDP sections */
+.sdp-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.sdp-section h3 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.sdp-textarea {
+  width: 100%;
+  min-height: 160px;
+  background: #1a1a1a;
+  border: 2px solid #333333;
+  border-radius: 12px;
+  padding: 1rem;
+  color: #ffffff;
+  font-family: monospace;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  resize: vertical;
+  box-sizing: border-box;
+  transition: border-color 0.2s;
+}
+
+.sdp-textarea:focus {
+  outline: none;
+  border-color: #ffffff;
+}
+
+.sdp-textarea::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.sdp-textarea:read-only {
+  background: #0f0f0f;
+  cursor: default;
+}
+
+@media (prefers-reduced-motion) {
+  *,
+  ::before,
+  ::after {
+    animation: none !important;
+  }
+}
