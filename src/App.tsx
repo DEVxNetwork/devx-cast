@@ -1,6 +1,6 @@
 import "./index.css";
 import { Tabs } from "./components/Tabs";
-import { Streamer } from "./components/Streamer";
+import { Caster } from "./components/Caster";
 import { Presenter } from "./components/Presenter";
 
 export function App() {
@@ -9,7 +9,7 @@ export function App() {
       <h1>WebRTC Screen Share</h1>
       <Tabs
         tabs={{
-          Streamer: <Streamer />,
+          Caster: <Caster />,
           Presenter: <Presenter />,
         }}
       />

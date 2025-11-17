@@ -73,8 +73,8 @@ code {
   width: 100%;
 }
 
-/* Streamer and Presenter containers */
-.streamer-container,
+/* Caster and Presenter containers */
+.caster-container,
 .presenter-container {
   display: flex;
   flex-direction: column;
@@ -230,6 +230,65 @@ code {
 .sdp-textarea:read-only {
   background: #0f0f0f;
   cursor: default;
+}
+
+/* Casters grid for presenter */
+.casters-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1.5rem;
+  margin-top: 1rem;
+}
+
+.caster-video-container {
+  display: flex;
+  flex-direction: column;
+  background: #1a1a1a;
+  border: 2px solid #333333;
+  border-radius: 12px;
+  padding: 1rem;
+}
+
+.caster-video-container video {
+  width: 100%;
+  background: #000000;
+  border-radius: 8px;
+  border: 1px solid #333333;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+}
+
+.video-placeholder {
+  width: 100%;
+  background: #1a1a1a;
+  border-radius: 8px;
+  border: 2px dashed #333333;
+  aspect-ratio: 16 / 9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.placeholder-content {
+  text-align: center;
+  color: #ffffff;
+}
+
+.placeholder-content p {
+  margin: 0.5rem 0;
+}
+
+.placeholder-id {
+  font-size: 0.875rem;
+  color: rgba(255, 255, 255, 0.6);
+  font-family: monospace;
+}
+
+.placeholder-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  width: 100%;
 }
 
 @media (prefers-reduced-motion) {
