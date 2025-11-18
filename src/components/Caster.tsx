@@ -1,39 +1,124 @@
-import { useState, useRef, useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  createOffer,
+  fetchExistingAnswer,
+  generateRoomCode,
+  subscribeToAnswer,
+  updateOfferStatus,
+} from "../lib/signaling";
+
+type CasterStep = "idle" | "preparing" | "awaiting" | "connected" | "error";
+
+function createDummyVideoStream(): MediaStream {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1280;
+  canvas.height = 720;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Failed to get canvas context");
+
+  let frame = 0;
+  const drawFrame = () => {
+    const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    const hue = (frame * 2) % 360;
+    gradient.addColorStop(0, `hsl(${hue}, 70%, 50%)`);
+    gradient.addColorStop(1, `hsl(${(hue + 90) % 360}, 70%, 50%)`);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.fillRect(40, 40, canvas.width - 80, canvas.height - 80);
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "48px Inter, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("DevX Cast • Dummy Stream", canvas.width / 2, canvas.height / 2 - 30);
+    ctx.font = "24px Inter, sans-serif";
+    ctx.fillText(`Frame ${frame}`, canvas.width / 2, canvas.height / 2 + 20);
+
+    frame++;
+  };
+
+  drawFrame();
+  const stream = canvas.captureStream(30);
+  const interval = setInterval(drawFrame, 1000 / 30);
+  stream.getTracks().forEach((track) =>
+    track.addEventListener("ended", () => {
+      clearInterval(interval);
+    })
+  );
+  return stream;
+}
 
 export function Caster() {
-  const [isSharing, setIsSharing] = useState(false);
-  const [connectionState, setConnectionState] = useState<string>("");
-  const [offerId, setOfferId] = useState<string>("");
+  const [casterName, setCasterName] = useState("Guest Caster");
+  const [roomCode, setRoomCode] = useState(generateRoomCode());
+  const [status, setStatus] = useState<CasterStep>("idle");
+  const [statusMessage, setStatusMessage] = useState("Ready to broadcast");
+  const [offerId, setOfferId] = useState<string | null>(null);
+  const [rtcState, setRtcState] = useState<string>("disconnected");
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const unsubscribeRef = useRef<(() => Promise<void>) | null>(null);
 
-  function makePeer() {
+  const inviteLink = useMemo(() => {
+    if (typeof window === "undefined") return "";
+    const url = new URL(window.location.origin + window.location.pathname);
+    url.searchParams.set("role", "presenter");
+    url.searchParams.set("room", roomCode);
+    return url.toString();
+  }, [roomCode]);
+
+  const cleanup = async () => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (pcRef.current) {
+      pcRef.current.onconnectionstatechange = null;
+      pcRef.current.oniceconnectionstatechange = null;
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+    if (unsubscribeRef.current) {
+      await unsubscribeRef.current();
+      unsubscribeRef.current = null;
+    }
+    setOfferId(null);
+    setRtcState("disconnected");
+  };
+
+  useEffect(() => {
+    return () => {
+      cleanup();
+    };
+  }, []);
+
+  const makePeer = () => {
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-      iceCandidatePoolSize: 0,
     });
 
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
-      setConnectionState(state);
-      console.log("PC connection state:", state);
+      setRtcState(state);
+      if (state === "connected") {
+        setStatus("connected");
+        setStatusMessage("Presenter connected");
+      } else if (state === "failed" || state === "disconnected" || state === "closed") {
+        setStatus("error");
+        setStatusMessage("Connection ended");
+      }
     };
 
     pc.oniceconnectionstatechange = () => {
-      console.log("PC ICE connection state:", pc.iceConnectionState);
-    };
-
-    pc.ontrack = (event) => {
-      console.log("Caster received track:", event.track, event.streams);
+      console.debug("ICE state", pc.iceConnectionState);
     };
 
     pcRef.current = pc;
-  }
+    return pc;
+  };
 
-  async function waitForIceGathering(pc: RTCPeerConnection) {
+  const waitForIceGathering = async (pc: RTCPeerConnection) => {
     if (pc.iceGatheringState === "complete") return;
     await new Promise<void>((resolve) => {
       const check = () => {
@@ -44,190 +129,178 @@ export function Caster() {
       };
       pc.addEventListener("icegatheringstatechange", check);
     });
-  }
+  };
 
   const handleStartShare = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: false,
-      });
+    if (!casterName.trim()) {
+      alert("Add a caster name so the presenter recognizes you.");
+      return;
+    }
 
+    try {
+      setStatus("preparing");
+      setStatusMessage("Preparing media stream…");
+      let stream: MediaStream | null = null;
+
+      try {
+        const realStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        if (realStream.getVideoTracks().length === 0) {
+          realStream.getTracks().forEach((track) => track.stop());
+          throw new Error("No tracks in real stream");
+        }
+        stream = realStream;
+      } catch {
+        stream = createDummyVideoStream();
+        setStatusMessage("Using dummy stream (screen share blocked)");
+      }
+
+      streamRef.current = stream;
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
 
-      streamRef.current = stream;
-      setIsSharing(true);
-      makePeer();
+      const pc = makePeer();
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream as MediaStream));
 
-      if (pcRef.current) {
-        stream.getTracks().forEach((track) => {
-          pcRef.current?.addTrack(track, stream);
-        });
-      }
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitForIceGathering(pc);
 
-      // Create offer and send to server
-      if (pcRef.current) {
-        const offer = await pcRef.current.createOffer();
-        await pcRef.current.setLocalDescription(offer);
-        await waitForIceGathering(pcRef.current);
+      const sessionDesc = pc.localDescription;
+      if (!sessionDesc) throw new Error("Failed to capture local session description");
 
-        if (pcRef.current.localDescription) {
-          // POST offer to server
-          const response = await fetch("/api/offer", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ offer: pcRef.current.localDescription }),
-          });
+      setStatus("awaiting");
+      setStatusMessage("Publishing offer to Supabase…");
 
-          if (response.ok) {
-            const data = await response.json();
-            setOfferId(data.offerId);
+      const record = await createOffer({
+        offer: sessionDesc,
+        casterName: casterName.trim(),
+        roomCode,
+      });
+      setOfferId(record.id);
+      setStatusMessage("Waiting for presenter to connect…");
 
-            // Listen for answer via SSE
-            const eventSource = new EventSource(`/api/answers/stream/${data.offerId}`);
-            eventSourceRef.current = eventSource;
+      const applyAnswer = async (answer: RTCSessionDescriptionInit) => {
+        const description =
+          typeof RTCSessionDescription !== "undefined" ? new RTCSessionDescription(answer) : answer;
+        await pc.setRemoteDescription(description);
+        setStatus("connected");
+        setStatusMessage("Presenter accepted your stream");
+      };
 
-            eventSource.onopen = () => {
-              console.log("SSE connection opened for offerId:", data.offerId);
-            };
+      unsubscribeRef.current = subscribeToAnswer(record.id, async (payload) => {
+        await applyAnswer(payload.answer);
+      });
 
-            eventSource.onmessage = async (event) => {
-              try {
-                const rawData = (event.data ?? "").trim();
-
-                // Ignore empty payloads or keepalive comments
-                if (!rawData || rawData.startsWith(":")) {
-                  return;
-                }
-
-                let parsedPayload: unknown;
-                try {
-                  parsedPayload = JSON.parse(rawData);
-                } catch (parseError) {
-                  console.error("Failed to parse answer event payload:", parseError, rawData);
-                  return;
-                }
-
-                const { answer } = parsedPayload as { answer?: unknown };
-                if (!pcRef.current || answer == null) {
-                  return;
-                }
-
-                let answerPayload: unknown = answer;
-                if (typeof answer === "string") {
-                  try {
-                    answerPayload = JSON.parse(answer);
-                  } catch (parseError) {
-                    console.error("Failed to parse answer JSON payload:", parseError, answer);
-                    alert(
-                      "Failed to process presenter response: " +
-                        (parseError instanceof Error ? parseError.message : String(parseError))
-                    );
-                    return;
-                  }
-                }
-
-                if (!answerPayload || typeof answerPayload !== "object") {
-                  console.error("Answer payload missing expected structure:", answerPayload);
-                  alert("Failed to process presenter response: invalid payload");
-                  return;
-                }
-
-                const answerInitCandidate = answerPayload as Partial<RTCSessionDescriptionInit>;
-                if (typeof answerInitCandidate.type !== "string" || typeof answerInitCandidate.sdp !== "string") {
-                  console.error("Answer payload missing SDP fields:", answerPayload);
-                  alert("Failed to process presenter response: incomplete SDP");
-                  return;
-                }
-
-                const descriptionInit: RTCSessionDescriptionInit = {
-                  type: answerInitCandidate.type,
-                  sdp: answerInitCandidate.sdp,
-                };
-
-                const description =
-                  typeof RTCSessionDescription !== "undefined"
-                    ? new RTCSessionDescription(descriptionInit)
-                    : descriptionInit;
-
-                console.log("Setting remote description with answer:", descriptionInit);
-                await pcRef.current.setRemoteDescription(description);
-                console.log("Remote description set, connection should be establishing...");
-                eventSource.close();
-                eventSourceRef.current = null;
-              } catch (err) {
-                console.error("Failed to set remote description:", err);
-                alert("Failed to set remote description: " + (err instanceof Error ? err.message : String(err)));
-              }
-            };
-
-            eventSource.onerror = (err) => {
-              console.error("SSE error:", err, "readyState:", eventSource.readyState);
-              // EventSource.CONNECTING = 0, OPEN = 1, CLOSED = 2
-              if (eventSource.readyState === EventSource.CLOSED) {
-                console.log("SSE connection closed");
-              }
-            };
-          }
-        }
-      }
+      const existingAnswer = await fetchExistingAnswer(record.id);
+      if (existingAnswer) await applyAnswer(existingAnswer.answer);
     } catch (err) {
-      alert("Screen share failed: " + (err instanceof Error ? err.message : String(err)));
       console.error(err);
+      setStatus("error");
+      setStatusMessage(err instanceof Error ? err.message : "Something went wrong");
+      await cleanup();
     }
   };
 
-  useEffect(() => {
-    return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-      }
-      if (pcRef.current) {
-        pcRef.current.close();
-      }
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
-    };
-  }, []);
+  const handleStop = async () => {
+    if (offerId) {
+      await updateOfferStatus(offerId, "completed");
+    }
+    await cleanup();
+    setRoomCode(generateRoomCode());
+    setStatus("idle");
+    setStatusMessage("Ready to broadcast");
+  };
 
   return (
-    <div className="caster-container">
-      <div className="instructions">
-        <p>Click <b>Start Screen Share</b> to begin sharing your screen. The connection will be established automatically.</p>
-      </div>
+    <div className="caster-stack">
+      <section className="panel">
+        <header className="panel-header">
+          <div>
+            <p className="panel-eyebrow">STEP 1</p>
+            <h3>Name your feed</h3>
+            <p>Presenters see this label next to your room code.</p>
+          </div>
+          <button className="ghost-button" onClick={() => setRoomCode(generateRoomCode())}>
+            New room code
+          </button>
+        </header>
 
-      <div className="controls-row">
-        <button onClick={handleStartShare} className="action-button" disabled={isSharing}>
-          {isSharing ? "Sharing..." : "Start Screen Share"}
-        </button>
-      </div>
+        <label className="field">
+          <span>Display name</span>
+          <input value={casterName} onChange={(e) => setCasterName(e.target.value)} placeholder="Figma Demo" />
+        </label>
 
-      {connectionState && (
-        <div className="connection-status">
-          Connection: <span className={`status-${connectionState}`}>{connectionState}</span>
+        <div className="room-chip">
+          <div>
+            <p>Room code</p>
+            <strong>{roomCode}</strong>
+          </div>
+          <button
+            className="ghost-button"
+            onClick={() => navigator.clipboard.writeText(roomCode).catch(() => null)}
+          >
+            Copy
+          </button>
         </div>
-      )}
 
-      {offerId && (
-        <div className="connection-status">
-          Offer ID: <code>{offerId}</code>
+        <div className="invite-link">
+          <p>Invite link</p>
+          <code>{inviteLink || "…"}</code>
+          <button
+            className="ghost-button"
+            onClick={() => inviteLink && navigator.clipboard.writeText(inviteLink).catch(() => null)}
+          >
+            Copy link
+          </button>
         </div>
-      )}
+      </section>
 
-      <div className="video-section">
-        <h3>Local preview</h3>
-        <video
-          ref={localVideoRef}
-          id="local"
-          autoPlay
-          playsInline
-          muted
-          className="video-player"
-        />
-      </div>
+      <section className="panel">
+        <header className="panel-header">
+          <div>
+            <p className="panel-eyebrow">STEP 2</p>
+            <h3>Stream status</h3>
+            <p>{statusMessage}</p>
+          </div>
+        </header>
+
+        <div className="status-grid">
+          <div className={`status-card ${status === "preparing" ? "active" : ""}`}>
+            <span>1</span>
+            <p>Capture stream</p>
+          </div>
+          <div className={`status-card ${status === "awaiting" ? "active" : ""}`}>
+            <span>2</span>
+            <p>Waiting for presenter</p>
+          </div>
+          <div className={`status-card ${status === "connected" ? "active" : ""}`}>
+            <span>3</span>
+            <p>Connected</p>
+          </div>
+        </div>
+
+        <div className="preview-shell">
+          <video ref={localVideoRef} autoPlay playsInline muted />
+          <div className="preview-meta">
+            <p>Peer status: {rtcState}</p>
+            {offerId && (
+              <p>
+                Offer ID: <code>{offerId.slice(0, 8)}…</code>
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="controls-row">
+          <button className="action-button" onClick={handleStartShare} disabled={status === "preparing" || status === "awaiting"}>
+            {status === "idle" ? "Start screen share" : status === "connected" ? "Reconnect" : "Streaming…"}
+          </button>
+          <button className="ghost-button" onClick={handleStop} disabled={!offerId}>
+            Stop session
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
