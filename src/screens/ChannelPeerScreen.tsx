@@ -9,9 +9,8 @@ import {
   useSetShareAlias,
   useHandleShareScreen,
   useHandleViewStream,
-  useStopShareSession,
-  useStopViewSession,
 } from "../store/channelStoreHelpers";
+import { useChannelStore } from "../store/channelStore";
 import { ScreenHeader } from "../components/ScreenHeader";
 import { ShareScreenCard } from "../components/ShareScreenCard";
 import { ViewStreamCard } from "../components/ViewStreamCard";
@@ -31,16 +30,16 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
   const setShareAlias = useSetShareAlias();
   const handleShareScreen = useHandleShareScreen();
   const handleViewStream = useHandleViewStream();
-  const stopShareSession = useStopShareSession();
-  const stopViewSession = useStopViewSession();
 
-  // Cleanup on unmount
+  // Cleanup on unmount only
   useEffect(() => {
     return () => {
+      // Use getState to avoid dependency issues with function references
+      const { stopShareSession, stopViewSession } = useChannelStore.getState();
       stopShareSession();
       stopViewSession();
     };
-  }, [stopShareSession, stopViewSession]);
+  }, []); // Empty deps - only run on unmount
 
   return (
     <div className="app">

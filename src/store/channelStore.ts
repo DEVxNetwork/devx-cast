@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
 import {
   shareSessionRef,
@@ -18,9 +17,7 @@ import {
   HOST_ANSWER_EVENT,
   HOST_TERMINATE_EVENT,
   VIEW_OFFER_EVENT,
-  VIEW_ANSWER_EVENT,
-  HOST_DIRECTORY_CHANNEL,
-  HOST_STATUS_EVENT,
+  VIEW_ANSWER_EVENT, HOST_STATUS_EVENT,
   HOST_BROADCAST_INTERVAL_MS,
   subscribeToRealtimeChannel,
   importHostPublicKey,
@@ -29,7 +26,7 @@ import {
   generateHostKeyPair,
   randomId,
   waitForIceGathering,
-  createPeerConnection,
+  createPeerConnection
 } from "../lib/webrtcUtils";
 import type { PeerOfferMessage, HostAnswerMessage, HostStatusPayload } from "../lib/webrtcTypes";
 
@@ -250,12 +247,31 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
   // Peer handlers
   stopShareSession: async () => {
     const session = shareSessionRef.current;
-    if (!session) return;
+    if (!session) {
+      console.log("[DEBUG] stopShareSession called but no session exists");
+      return;
+    }
+    
+    console.log("[DEBUG] stopShareSession called", { peerId: session.peerId });
+    
+    // Clear the ref first to prevent race conditions
     shareSessionRef.current = null;
-    session.stream.getTracks().forEach((track) => track.stop());
+    
+    // Clean up tracks
+    session.stream.getTracks().forEach((track) => {
+      track.onended = null; // Clear event handlers
+      track.stop();
+    });
+    
+    // Clean up peer connection
     session.pc.onconnectionstatechange = null;
     session.pc.close();
+    
+    // Unsubscribe from signal channel
     await session.signalChannel.unsubscribe().catch(() => null);
+    
+    // Update state
+    console.log("[DEBUG] Setting share status to idle");
     get().setShareStatus("idle");
     get().setShareError(null);
   },
@@ -277,17 +293,21 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
   },
 
   handleShareScreen: async (hostKey: string) => {
+    console.log("[DEBUG] handleShareScreen called", { hostKey, hasExistingSession: !!shareSessionRef.current });
     const state = get();
     if (shareSessionRef.current) {
+      console.log("[DEBUG] Stopping existing session");
       await state.stopShareSession();
       return;
     }
     if (!navigator.mediaDevices?.getDisplayMedia) {
+      console.error("[DEBUG] Screen sharing not supported");
       state.setShareError("Screen sharing is not supported in this browser.");
       return;
     }
     state.setShareError(null);
     state.setShareStatus("prompting");
+    console.log("[DEBUG] Status set to prompting");
 
     const getVerifyKey = async (hostKey: string) => {
       const cached = verifyKeyCacheRef.get(hostKey);
@@ -298,23 +318,46 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
     };
 
     try {
+      console.log("[DEBUG] Requesting screen share...");
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      console.log("[DEBUG] Screen share stream obtained", { 
+        trackCount: stream.getVideoTracks().length,
+        trackStates: stream.getVideoTracks().map(t => ({ id: t.id, enabled: t.enabled, readyState: t.readyState }))
+      });
+      
       if (!stream.getVideoTracks().length) {
         throw new Error("No video track captured");
       }
 
+      console.log("[DEBUG] Creating peer connection");
       const pc = createPeerConnection();
-      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+      stream.getVideoTracks().forEach((track) => {
+        console.log("[DEBUG] Adding track to peer connection", { trackId: track.id });
+        pc.addTrack(track, stream);
+      });
 
-      const signalChannel = supabase.channel(getSignalChannelName(hostKey), {
+      const channelName = getSignalChannelName(hostKey);
+      console.log("[DEBUG] Creating signal channel", { channelName });
+      const signalChannel = supabase.channel(channelName, {
         config: { broadcast: { self: true } },
       });
       const peerId = `peer_${randomId()}`;
       const nonce = `nonce_${randomId()}${randomId()}`;
+      console.log("[DEBUG] Generated peer ID and nonce", { peerId, nonce });
 
       signalChannel.on("broadcast", { event: HOST_ANSWER_EVENT }, async ({ payload }) => {
+        console.log("[DEBUG] Received HOST_ANSWER_EVENT", { payload, peerId, nonce });
         const message = payload as HostAnswerMessage;
-        if (message.peerId !== peerId || message.nonce !== nonce) return;
+        if (message.peerId !== peerId || message.nonce !== nonce) {
+          console.log("[DEBUG] Message doesn't match - ignoring", { 
+            messagePeerId: message.peerId, 
+            messageNonce: message.nonce,
+            expectedPeerId: peerId,
+            expectedNonce: nonce
+          });
+          return;
+        }
+        console.log("[DEBUG] Message matches - verifying signature");
         const verifyKey = await getVerifyKey(hostKey);
         const isValid = await verifyHostSignature(
           verifyKey,
@@ -322,23 +365,29 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
           message.signature
         );
         if (!isValid) {
+          console.error("[DEBUG] Host signature is invalid");
           get().setShareError("Host signature is invalid.");
           await get().stopShareSession();
           return;
         }
+        console.log("[DEBUG] Signature valid - setting remote description");
         const description =
           typeof RTCSessionDescription !== "undefined"
             ? new RTCSessionDescription(message.answer)
             : message.answer;
         await pc.setRemoteDescription(description);
+        console.log("[DEBUG] Remote description set - connection should be established");
         get().setShareStatus("connected");
       });
 
       signalChannel.on("broadcast", { event: HOST_TERMINATE_EVENT }, () => {
+        console.log("[DEBUG] Received HOST_TERMINATE_EVENT");
         get().stopShareSession().catch(() => null);
       });
 
+      console.log("[DEBUG] Subscribing to signal channel");
       await subscribeToRealtimeChannel(signalChannel);
+      console.log("[DEBUG] Signal channel subscribed");
 
       shareSessionRef.current = {
         peerId,
@@ -348,23 +397,53 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
         stream,
         signalChannel,
       };
+      console.log("[DEBUG] Session stored in ref", { peerId });
+
+      // Handle track ended (user stops sharing in browser)
+      stream.getVideoTracks().forEach((track) => {
+        track.onended = () => {
+          console.log("[DEBUG] Screen share track ended", { peerId });
+          // Only stop if this is still the current session
+          if (shareSessionRef.current?.peerId === peerId) {
+            get().stopShareSession().catch(() => null);
+          }
+        };
+      });
 
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+        const currentSession = shareSessionRef.current;
+        // Only act on this session if it's still the current one
+        if (!currentSession || currentSession.peerId !== peerId) {
+          console.log("[DEBUG] Connection state change for stale session - ignoring", { 
+            currentPeerId: currentSession?.peerId, 
+            thisPeerId: peerId 
+          });
+          return;
+        }
+        
+        const connectionState = pc.connectionState;
+        console.log("[DEBUG] Peer share connection state changed", { peerId, connectionState, iceConnectionState: pc.iceConnectionState, iceGatheringState: pc.iceGatheringState });
+        
+        if (connectionState === "failed" || connectionState === "closed") {
+          console.error("[DEBUG] Peer share connection failed/closed", { peerId, connectionState });
           get().stopShareSession().catch(() => null);
-        } else if (pc.connectionState === "connected") {
-          console.log("Peer share connection established");
+        } else if (connectionState === "connected") {
+          console.log("[DEBUG] Peer share connection established", { peerId });
         }
       };
 
+      console.log("[DEBUG] Creating offer");
       get().setShareStatus("publishing");
       const offer = await pc.createOffer();
+      console.log("[DEBUG] Offer created", { type: offer.type, sdp: offer.sdp?.substring(0, 100) });
       await pc.setLocalDescription(offer);
+      console.log("[DEBUG] Local description set, waiting for ICE gathering");
       await waitForIceGathering(pc);
       if (!pc.localDescription) throw new Error("Missing local description");
+      console.log("[DEBUG] ICE gathering complete", { localDescription: pc.localDescription });
 
       get().setShareStatus("awaiting");
-      console.log("Peer sending offer to host", { peerId, hostKey, channelName: getSignalChannelName(hostKey) });
+      console.log("[DEBUG] Sending offer to host", { peerId, hostKey, channelName, alias: state.shareAlias });
       await signalChannel.send({
         type: "broadcast",
         event: PEER_OFFER_EVENT,
@@ -376,9 +455,9 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
           timestamp: Date.now(),
         } satisfies PeerOfferMessage,
       });
-      console.log("Peer offer sent", { peerId });
+      console.log("[DEBUG] Peer offer sent successfully", { peerId });
     } catch (err) {
-      console.error("Failed to start screen share", err);
+      console.error("[DEBUG] Failed to start screen share", err);
       get().setShareStatus("error");
       get().setShareError(err instanceof Error ? err.message : "Failed to start screen share");
       await get().stopShareSession();
@@ -524,17 +603,18 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
   },
 
   handlePeerOffer: async (payload: PeerOfferMessage, channelId: string) => {
+    console.log("[DEBUG HOST] handlePeerOffer called", { payload, channelId });
     const keyPair = hostKeyPairRef.current;
     const signalChannel = hostSignalChannelRef.current;
     if (!keyPair || !signalChannel) {
-      console.warn("Host not ready to accept peer offer", { keyPair: !!keyPair, signalChannel: !!signalChannel });
+      console.warn("[DEBUG HOST] Host not ready to accept peer offer", { keyPair: !!keyPair, signalChannel: !!signalChannel });
       return;
     }
 
     const state = get();
     const peerId = payload.peerId;
     const alias = payload.alias || "Guest share";
-    console.log("Host received peer offer", { peerId, alias });
+    console.log("[DEBUG HOST] Host received peer offer", { peerId, alias, nonce: payload.nonce });
 
     const closeHostSession = (peerId: string) => {
       const session = hostSessionsRef.get(peerId);
@@ -651,7 +731,7 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
       console.log("Host signing answer", { peerId });
       const signature = await signPayload(keyPair.privateKey, signedPayload);
 
-      console.log("Host sending answer to peer", { peerId, signalChannel: !!signalChannel });
+      console.log("[DEBUG HOST] Host sending answer to peer", { peerId, signalChannel: !!signalChannel, channelName: getSignalChannelName(state.hostKeyPair!.publicKeyString) });
       await signalChannel.send({
         type: "broadcast",
         event: HOST_ANSWER_EVENT,
@@ -662,7 +742,7 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
         } satisfies HostAnswerMessage,
       });
 
-      console.log("Host sent answer to peer", { peerId });
+      console.log("[DEBUG HOST] Host sent answer to peer successfully", { peerId, answerType: signedPayload.answer.type });
       get().broadcastLocalHostStatus(channelId);
     } catch (err) {
       console.error("Failed to process peer offer", { peerId, error: err });
@@ -735,24 +815,27 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
       hostSignalChannelRef.current = null;
     }
     const channelName = getSignalChannelName(hostKey);
-    console.log("Host starting signal channel", { channelName });
+    console.log("[DEBUG HOST] Host starting signal channel", { channelName, hostKey });
     const signalChannel = supabase.channel(channelName, { config: { broadcast: { self: false } } });
 
     signalChannel.on("broadcast", { event: PEER_OFFER_EVENT }, ({ payload }) => {
-      console.log("Host received PEER_OFFER_EVENT", payload);
+      console.log("[DEBUG HOST] Host received PEER_OFFER_EVENT", payload);
       const currentState = get();
       const channelId = currentState.hostChannelId;
+      console.log("[DEBUG HOST] Processing peer offer", { channelId, hasChannelId: !!channelId });
       if (channelId) {
         state.handlePeerOffer(payload as PeerOfferMessage, channelId);
+      } else {
+        console.error("[DEBUG HOST] No channelId available to process peer offer");
       }
     });
     signalChannel.on("broadcast", { event: VIEW_OFFER_EVENT }, ({ payload }) => {
-      console.log("Host received VIEW_OFFER_EVENT", payload);
+      console.log("[DEBUG HOST] Host received VIEW_OFFER_EVENT", payload);
       state.handleViewOffer(payload as { peerId: string; offer: RTCSessionDescriptionInit });
     });
 
     await subscribeToRealtimeChannel(signalChannel);
-    console.log("Host signal channel subscribed", { channelName });
+    console.log("[DEBUG HOST] Host signal channel subscribed successfully", { channelName });
     hostSignalChannelRef.current = signalChannel;
   },
 
