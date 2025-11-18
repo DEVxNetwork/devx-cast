@@ -150,12 +150,12 @@ const createPeerConnection = () =>
     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   });
 
-type ChannelScreenProps = {
+type ChannelPeerScreenProps = {
   hostKey: string;
   onBack: () => void;
 };
 
-export function ChannelScreen({ hostKey, onBack }: ChannelScreenProps) {
+export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
   const [shareStatus, setShareStatus] = useState<ShareStatus>("idle");
   const [shareError, setShareError] = useState<string | null>(null);
   const [shareAlias, setShareAlias] = useState<string>("Guest share");

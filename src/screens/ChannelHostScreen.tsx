@@ -149,12 +149,12 @@ const createPeerConnection = () =>
     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   });
 
-type HostChannelScreenProps = {
+type ChannelHostScreenProps = {
   channelId: string;
   onBack: () => void;
 };
 
-export function HostChannelScreen({ channelId, onBack }: HostChannelScreenProps) {
+export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps) {
   const [streamingPeers, setStreamingPeers] = useState<StreamingPeer[]>([]);
   const [activePeerId, setActivePeerId] = useState<string | null>(null);
   const [broadcastPeers, setBroadcastPeers] = useState<number>(0);

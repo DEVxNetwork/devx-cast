@@ -1,8 +1,8 @@
 import { useState } from "react";
 import "./index.css";
 import { ChannelListScreen } from "./screens/ChannelListScreen";
-import { ChannelScreen } from "./screens/ChannelScreen";
-import { HostChannelScreen } from "./screens/HostChannelScreen";
+import { ChannelPeerScreen } from "./screens/ChannelPeerScreen";
+import { ChannelHostScreen } from "./screens/ChannelHostScreen";
 
 type Screen = "channel-list" | "channel" | "host-channel";
 
@@ -29,7 +29,7 @@ export function App() {
 
   if (screen === "host-channel") {
     return (
-      <HostChannelScreen
+      <ChannelHostScreen
         channelId={hostChannelId!}
         onBack={handleBackToList}
       />
@@ -38,7 +38,7 @@ export function App() {
 
   if (screen === "channel" && selectedChannelHostKey) {
     return (
-      <ChannelScreen
+      <ChannelPeerScreen
         hostKey={selectedChannelHostKey}
         onBack={handleBackToList}
       />
