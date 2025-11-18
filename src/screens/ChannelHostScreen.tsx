@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useCallback } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
 import {
@@ -17,8 +17,13 @@ import {
   presenceChannelRef,
   heartbeatRef,
   peerVideoRefs,
-  hostVideoRef,
 } from "../store/webrtcRefs";
+import { ScreenHeader } from "../components/ScreenHeader";
+import { BroadcastPlayer } from "../components/BroadcastPlayer";
+import { StatsDisplay } from "../components/StatsDisplay";
+import { StreamingPeersSection } from "../components/StreamingPeersSection";
+import { PeerCard } from "../components/PeerCard";
+import { EmptyState } from "../components/EmptyState";
 
 type HostStatusPayload = {
   hostId: string;
@@ -457,10 +462,22 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
     viewSessionsRef.clear();
   };
 
-  const handleHighlightPeer = (peerId: string) => {
+  const handleHighlightPeer = useCallback((peerId: string) => {
     const { setActivePeerId } = useChannelStore.getState();
     setActivePeerId(peerId);
-  };
+  }, []);
+
+  const handleVideoRef = useCallback((peerId: string, element: HTMLVideoElement | null) => {
+    if (!element) {
+      peerVideoRefs.delete(peerId);
+      return;
+    }
+    peerVideoRefs.set(peerId, element);
+    const peer = streamingPeers.find((p) => p.id === peerId);
+    if (peer?.stream && element.srcObject !== peer.stream) {
+      element.srcObject = peer.stream;
+    }
+  }, [streamingPeers]);
 
   // Initialize host on mount, cleanup on unmount
   useEffect(() => {
@@ -516,13 +533,8 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
     });
   }, [streamingPeers]);
 
-  // Update host video element when active peer changes (DOM updates only)
+  // Broadcast status when active peer changes
   useEffect(() => {
-    if (hostVideoRef.current && activePeer?.stream) {
-      hostVideoRef.current.srcObject = activePeer.stream;
-    } else if (hostVideoRef.current) {
-      hostVideoRef.current.srcObject = null;
-    }
     broadcastLocalHostStatus();
   }, [activePeer]);
 
@@ -545,101 +557,48 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
     }
   }, [activePeer]);
 
+  const hostKey = hostKeyPairRef.current?.publicKeyString ?? "Initializing…";
+
   return (
     <div className="app">
       <div className="page">
         <div className="card">
-          <header className="header">
-            <div className="header-content">
-              <p className="label">Host channel</p>
-              <code>{hostKeyPairRef.current?.publicKeyString ?? "Initializing…"}</code>
-            </div>
-            <button className="btn btn-secondary" onClick={onBack}>
-              Stop hosting
-            </button>
-          </header>
+          <ScreenHeader
+            label="Host channel"
+            value={hostKey}
+            backButtonLabel="Stop hosting"
+            onBack={onBack}
+          />
 
           <section className="section">
-            <div className="broadcast-player" data-empty={!activePeer}>
-              {activePeer ? (
-                <>
-                  <video ref={hostVideoRef} autoPlay playsInline muted />
-                  <div className="broadcast-info">
-                    <p className="broadcast-title">{activePeer.label}</p>
-                    <p className="broadcast-subtitle">{activePeer.screenTitle}</p>
-                  </div>
-                </>
-              ) : (
-                <p>No active stream selected</p>
-              )}
-            </div>
-            <div className="stats">
-              <div className="stat">
-                <p className="label stat-label">Broadcast peer count</p>
-                <span className="stat-value">{broadcastPeers}</span>
-              </div>
-              <div className="stat">
-                <p className="label stat-label">Active streaming peer</p>
-                <span className="stat-value" style={{ fontSize: "1rem", fontWeight: "normal" }}>
-                  {activePeer ? activePeer.label : "None"}
-                </span>
-              </div>
-            </div>
+            <BroadcastPlayer
+              stream={activePeer?.stream ?? null}
+              peerLabel={activePeer?.label ?? null}
+              peerScreenTitle={activePeer?.screenTitle ?? null}
+            />
+            <StatsDisplay broadcastPeers={broadcastPeers} activePeerLabel={activePeer?.label ?? null} />
           </section>
 
-          <section className="section">
-            <div className="section-header">
-              <div className="section-title">
-                <p className="label">Streaming peers</p>
-                <p className="muted" style={{ fontSize: "0.875rem", margin: 0 }}>
-                  Only peers actively sharing are shown here.
-                </p>
-              </div>
-              <span className="section-count">{streamingPeers.length}</span>
-            </div>
-
+          <StreamingPeersSection peerCount={streamingPeers.length}>
             {streamingPeers.length === 0 ? (
-              <p className="muted">No peers are streaming to this channel.</p>
+              <EmptyState message="No peers are streaming to this channel." />
             ) : (
               <div className="peer-grid">
-                {streamingPeers.map((peer) => {
-                  const isActive = activePeerId === peer.id;
-                  return (
-                    <div key={peer.id} className={`peer-card ${isActive ? "active" : ""}`}>
-                      <div className="peer-video-container">
-                        {peer.stream ? (
-                          <video
-                            ref={(el) => {
-                              if (!el) {
-                                peerVideoRefs.delete(peer.id);
-                                return;
-                              }
-                              peerVideoRefs.set(peer.id, el);
-                              if (peer.stream && el.srcObject !== peer.stream) {
-                                el.srcObject = peer.stream;
-                              }
-                            }}
-                            autoPlay
-                            playsInline
-                            muted
-                          />
-                        ) : (
-                          <span>{peer.label}</span>
-                        )}
-                      </div>
-                      <div className="peer-info">
-                        <span className="peer-name">{peer.label}</span>
-                        <p className="peer-description">{peer.screenTitle}</p>
-                      </div>
-                      <button className="btn btn-primary" type="button" onClick={() => handleHighlightPeer(peer.id)}>
-                        {isActive ? "Broadcasting" : "Switch broadcast"}
-                      </button>
-                    </div>
-                  );
-                })}
+                {streamingPeers.map((peer) => (
+                  <PeerCard
+                    key={peer.id}
+                    peerId={peer.id}
+                    label={peer.label}
+                    screenTitle={peer.screenTitle}
+                    stream={peer.stream ?? null}
+                    isActive={activePeerId === peer.id}
+                    onVideoRef={handleVideoRef}
+                    onHighlight={handleHighlightPeer}
+                  />
+                ))}
               </div>
             )}
-          </section>
+          </StreamingPeersSection>
         </div>
       </div>
     </div>

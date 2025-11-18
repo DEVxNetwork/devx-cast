@@ -1,6 +1,9 @@
 import { useEffect } from "react";
 import { useChannels } from "../store/channelStoreHelpers";
 import { initChannelListSubscriptions } from "../lib/channelSubscriptions";
+import { ChannelListHeader } from "../components/ChannelListHeader";
+import { ChannelList } from "../components/ChannelList";
+import { StartChannelButton } from "../components/StartChannelButton";
 
 type ChannelListScreenProps = {
   onStartChannel: () => void;
@@ -19,40 +22,13 @@ export function ChannelListScreen({ onStartChannel, onSelectChannel }: ChannelLi
     <div className="app">
       <div className="page">
         <div className="card">
-          <header className="header">
-            <div className="header-content">
-              <h1>Active Channels</h1>
-              <p className="muted">{channels.length} channel{channels.length !== 1 ? "s" : ""} available</p>
-            </div>
-          </header>
+          <ChannelListHeader channelCount={channels.length} />
 
           <section className="section">
-            <div className="channel-list">
-              {channels.length === 0 ? (
-                <p className="muted">Waiting for hosts to appear…</p>
-              ) : (
-                channels.map((channel) => (
-                  <button
-                    key={channel.id}
-                    className="channel-item"
-                    onClick={() => onSelectChannel(channel.hostKey)}
-                  >
-                    <div>
-                      <p className="label">Host public key</p>
-                      <code>{channel.hostKey}</code>
-                    </div>
-                    <span>{channel.broadcastPeers} peer{channel.broadcastPeers !== 1 ? "s" : ""}</span>
-                  </button>
-                ))
-              )}
-            </div>
+            <ChannelList channels={channels} onSelectChannel={onSelectChannel} />
           </section>
 
-          <section className="section">
-            <button className="btn btn-primary" onClick={onStartChannel}>
-              Start Channel
-            </button>
-          </section>
+          <StartChannelButton onClick={onStartChannel} />
         </div>
       </div>
     </div>

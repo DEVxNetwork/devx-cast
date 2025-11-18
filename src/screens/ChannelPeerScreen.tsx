@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
 import {
@@ -13,26 +13,13 @@ import {
   useSetViewStatus,
   useSetViewError,
 } from "../store/channelStoreHelpers";
-import { shareSessionRef, viewSessionRef, viewVideoRef, verifyKeyCacheRef } from "../store/webrtcRefs";
+import { shareSessionRef, viewSessionRef, verifyKeyCacheRef } from "../store/webrtcRefs";
+import { ScreenHeader } from "../components/ScreenHeader";
+import { ShareScreenCard } from "../components/ShareScreenCard";
+import { ViewStreamCard } from "../components/ViewStreamCard";
 
 type ShareStatus = "idle" | "prompting" | "publishing" | "awaiting" | "connected" | "error";
 type ViewStatus = "idle" | "connecting" | "connected" | "error";
-
-const shareStatusCopy: Record<ShareStatus, string> = {
-  idle: "Not sharing",
-  prompting: "Waiting for screen selection…",
-  publishing: "Publishing offer…",
-  awaiting: "Waiting for host to accept…",
-  connected: "Streaming to host",
-  error: "Share failed",
-};
-
-const viewStatusCopy: Record<ViewStatus, string> = {
-  idle: "Not viewing",
-  connecting: "Connecting…",
-  connected: "Viewing stream",
-  error: "View failed",
-};
 
 type HostKeyPair = {
   publicKey: CryptoKey;
@@ -184,6 +171,8 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
     setShareError(null);
   };
 
+  const [viewStream, setViewStream] = useState<MediaStream | null>(null);
+
   const stopViewSession = async () => {
     const session = viewSessionRef.current;
     if (!session) return;
@@ -195,9 +184,7 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
     session.pc.ontrack = null;
     session.pc.close();
     await session.signalChannel.unsubscribe().catch(() => null);
-    if (viewVideoRef.current) {
-      viewVideoRef.current.srcObject = null;
-    }
+    setViewStream(null);
     setViewStatus("idle");
     setViewError(null);
   };
@@ -323,17 +310,13 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
 
       pc.ontrack = (event) => {
         if (event.streams && event.streams[0]) {
-          if (viewVideoRef.current) {
-            viewVideoRef.current.srcObject = event.streams[0];
-          }
+          setViewStream(event.streams[0]);
           if (viewSessionRef.current) {
             viewSessionRef.current.stream = event.streams[0];
           }
         } else if (event.track) {
           stream.addTrack(event.track);
-          if (viewVideoRef.current) {
-            viewVideoRef.current.srcObject = stream;
-          }
+          setViewStream(stream);
         }
         setViewStatus("connected");
       };
@@ -403,82 +386,32 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
     };
   }, []);
 
-  // Update video element when view stream changes (DOM updates only)
-  useEffect(() => {
-    if (viewVideoRef.current && viewSessionRef.current?.stream) {
-      viewVideoRef.current.srcObject = viewSessionRef.current.stream;
-    }
-  }, [viewStatus]);
-
-  const isShareActive = shareStatus !== "idle" && shareStatus !== "error";
-  const shareButtonDisabled = shareStatus === "prompting" || shareStatus === "publishing";
-  const isViewActive = viewStatus !== "idle" && viewStatus !== "error";
-  const viewButtonDisabled = viewStatus === "connecting";
-
   return (
     <div className="app">
       <div className="page">
         <div className="card">
-          <header className="header">
-            <div className="header-content">
-              <p className="label">Channel host key</p>
-              <code>{hostKey}</code>
-            </div>
-            <button className="btn btn-secondary" onClick={onBack}>
-              Back to channels
-            </button>
-          </header>
+          <ScreenHeader
+            label="Channel host key"
+            value={hostKey}
+            backButtonLabel="Back to channels"
+            onBack={onBack}
+          />
 
           <section className="section">
             <div className="options-grid">
-              <div className="option-card">
-                <h3>Share screen</h3>
-                <p>
-                  Start a WebRTC session to push your screen into the host console. Your request is signed against the
-                  host key so the host can trust it.
-                </p>
-                <div className="field">
-                  <span className="field-label">Display name</span>
-                  <input
-                    className="field-input"
-                    value={shareAlias}
-                    onChange={(event) => setShareAlias(event.target.value)}
-                    placeholder="Guest share"
-                  />
-                </div>
-                {shareError && <p className="error">{shareError}</p>}
-                <p className="muted">Status: {shareStatusCopy[shareStatus]}</p>
-                <button
-                  className="btn btn-secondary"
-                  type="button"
-                  onClick={handleShareScreen}
-                  disabled={shareButtonDisabled}
-                >
-                  {isShareActive ? "Stop sharing" : "Share screen"}
-                </button>
-              </div>
-              <div className="option-card">
-                <h3>View stream</h3>
-                <p>
-                  Verify the host signature, connect, and watch the trusted broadcast feed. You only receive what the host
-                  is streaming.
-                </p>
-                {viewError && <p className="error">{viewError}</p>}
-                <p className="muted">Status: {viewStatusCopy[viewStatus]}</p>
-                <button
-                  className="btn btn-secondary"
-                  type="button"
-                  onClick={handleViewStream}
-                  disabled={viewButtonDisabled}
-                >
-                  {isViewActive ? "Stop viewing" : "View stream"}
-                </button>
-                {isViewActive && (
-                  <div className="video-player" style={{ marginTop: "1rem" }}>
-                    <video ref={viewVideoRef} autoPlay playsInline muted />
-                  </div>
-                )}
-              </div>
+              <ShareScreenCard
+                shareStatus={shareStatus}
+                shareError={shareError}
+                shareAlias={shareAlias}
+                onAliasChange={setShareAlias}
+                onShareClick={handleShareScreen}
+              />
+              <ViewStreamCard
+                viewStatus={viewStatus}
+                viewError={viewError}
+                stream={viewStream}
+                onViewClick={handleViewStream}
+              />
             </div>
           </section>
         </div>
