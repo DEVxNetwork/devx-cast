@@ -466,6 +466,8 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
   },
 
   handleViewStream: async (hostKey: string) => {
+    // Note: Viewing streams is independent of screen sharing.
+    // A peer can view streams without sharing their own screen.
     const state = get();
     if (viewSessionRef.current) {
       await state.stopViewSession();
@@ -520,31 +522,54 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
 
       signalChannel.on("broadcast", { event: VIEW_ANSWER_EVENT }, async ({ payload }) => {
         const message = payload as { peerId: string; answer: RTCSessionDescriptionInit; signature: string };
-        if (message.peerId !== peerId) return;
+        console.log("[DEBUG] Received VIEW_ANSWER_EVENT", { messagePeerId: message.peerId, expectedPeerId: peerId });
+        if (message.peerId !== peerId) {
+          console.log("[DEBUG] View answer peerId mismatch - ignoring", { messagePeerId: message.peerId, expectedPeerId: peerId });
+          return;
+        }
+        console.log("[DEBUG] View answer matches - verifying signature");
         const verifyKey = await getVerifyKey(hostKey);
+        const verifyPayload = { peerId: message.peerId, answer: message.answer };
+        console.log("[DEBUG] Verifying view answer payload", { verifyPayload: JSON.stringify(verifyPayload) });
         const isValid = await verifyHostSignature(
           verifyKey,
-          { peerId: message.peerId, answer: message.answer },
+          verifyPayload,
           message.signature
         );
         if (!isValid) {
+          console.error("[DEBUG] Host signature is invalid for view answer");
           get().setViewError("Host signature is invalid.");
           await get().stopViewSession();
           return;
         }
+        console.log("[DEBUG] View answer signature valid - setting remote description");
         const description =
           typeof RTCSessionDescription !== "undefined"
             ? new RTCSessionDescription(message.answer)
             : message.answer;
         await pc.setRemoteDescription(description);
+        console.log("[DEBUG] View remote description set - connection should be established");
       });
 
       await subscribeToRealtimeChannel(signalChannel);
 
+      // Create offer for receiving-only connection (no local tracks needed)
+      // The viewer only receives tracks from the host, doesn't send any
+      // Add transceivers configured for receive-only to ensure the offer includes media sections
+      console.log("[DEBUG] Creating view offer (receive-only, no local tracks)");
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.addTransceiver("audio", { direction: "recvonly" });
+      
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       await waitForIceGathering(pc);
       if (!pc.localDescription) throw new Error("Missing local description");
+      
+      console.log("[DEBUG] View offer created and ICE gathering complete", { 
+        peerId, 
+        offerType: pc.localDescription.type,
+        sdpLines: pc.localDescription.sdp?.split('\n').length || 0
+      });
 
       await signalChannel.send({
         type: "broadcast",
@@ -555,6 +580,7 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
           timestamp: Date.now(),
         },
       });
+      console.log("[DEBUG] View offer sent to host", { peerId });
     } catch (err) {
       console.error("Failed to start viewing stream", err);
       get().setViewStatus("error");
@@ -763,12 +789,30 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
     const keyPair = hostKeyPairRef.current;
     const signalChannel = hostSignalChannelRef.current;
     const state = get();
+    
+    if (!keyPair || !signalChannel) {
+      console.log("[DEBUG HOST] Cannot handle view offer - missing keyPair or signalChannel", {
+        hasKeyPair: !!keyPair,
+        hasSignalChannel: !!signalChannel
+      });
+      return;
+    }
+
+    // Find active peer or first streaming peer
     const activePeer = state.activePeerId
       ? state.streamingPeers.find((p) => p.id === state.activePeerId)
+      : state.streamingPeers.length > 0
+      ? state.streamingPeers[0]
       : null;
-    if (!keyPair || !signalChannel || !activePeer) return;
+
+    if (!activePeer) {
+      console.log("[DEBUG HOST] Cannot handle view offer - no streaming peers available");
+      return;
+    }
 
     const viewerId = payload.peerId;
+    console.log("[DEBUG HOST] Handling view offer", { viewerId, activePeerId: activePeer.id });
+    
     if (viewSessionsRef.has(viewerId)) {
       viewSessionsRef.get(viewerId)?.close();
       viewSessionsRef.delete(viewerId);
@@ -782,37 +826,55 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
         activePeer.stream.getTracks().forEach((track) => {
           pc.addTrack(track, activePeer.stream!);
         });
+        console.log("[DEBUG HOST] Added tracks to view session", { 
+          viewerId, 
+          trackCount: activePeer.stream.getTracks().length 
+        });
+      } else {
+        console.warn("[DEBUG HOST] Active peer has no stream", { activePeerId: activePeer.id });
       }
 
       pc.onconnectionstatechange = () => {
         if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+          console.log("[DEBUG HOST] View session connection closed", { viewerId, state: pc.connectionState });
           viewSessionsRef.delete(viewerId);
         }
       };
 
       await pc.setRemoteDescription(payload.offer);
+      console.log("[DEBUG HOST] Set remote description for view offer", { viewerId });
+      
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       await waitForIceGathering(pc);
       if (!pc.localDescription) throw new Error("Missing local description");
 
+      // Normalize RTCSessionDescription to plain object for consistent signing
+      const answerObj = {
+        type: pc.localDescription.type,
+        sdp: pc.localDescription.sdp,
+      };
+
       const signedPayload = {
         peerId: viewerId,
-        answer: pc.localDescription,
+        answer: answerObj,
       };
+      console.log("[DEBUG HOST] Signing view answer", { viewerId, signedPayload: JSON.stringify(signedPayload) });
       const signature = await signPayload(keyPair.privateKey, signedPayload);
 
       await signalChannel.send({
         type: "broadcast",
         event: VIEW_ANSWER_EVENT,
         payload: {
-          ...signedPayload,
+          peerId: signedPayload.peerId,
+          answer: signedPayload.answer,
           signature,
           timestamp: Date.now(),
         },
       });
+      console.log("[DEBUG HOST] Sent view answer to viewer", { viewerId });
     } catch (err) {
-      console.error("Failed to process view offer", err);
+      console.error("[DEBUG HOST] Failed to process view offer", { viewerId, error: err });
       viewSessionsRef.delete(viewerId);
     }
   },
