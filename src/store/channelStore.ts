@@ -20,14 +20,17 @@ import {
   VIEW_ANSWER_EVENT, HOST_STATUS_EVENT,
   HOST_BROADCAST_INTERVAL_MS,
   subscribeToRealtimeChannel,
-  importHostPublicKey,
-  verifyHostSignature,
-  signPayload,
-  generateHostKeyPair,
   randomId,
   waitForIceGathering,
   createPeerConnection
 } from "../lib/webrtcUtils";
+import {
+  generateHostKeyPair,
+  importHostPublicKey,
+  signPayload,
+  verifyHostSignature,
+  type HostKeyPair as ECDSAHostKeyPair,
+} from "../lib/ecdsa";
 import type { PeerOfferMessage, HostAnswerMessage, HostStatusPayload } from "../lib/webrtcTypes";
 
 export type Channel = {
@@ -72,15 +75,13 @@ interface ChannelStore {
   clearChannels: () => void;
 
   // Host state
-  hostChannelId: string | null;
-  hostKeyPair: { publicKey: CryptoKey; privateKey: CryptoKey; publicKeyString: string } | null;
+  hostKeyPair: ECDSAHostKeyPair | null;
   streamingPeers: StreamingPeer[];
   activePeerId: string | null;
   broadcastPeers: number;
   
   // Host actions
-  setHostChannelId: (id: string | null) => void;
-  setHostKeyPair: (keyPair: { publicKey: CryptoKey; privateKey: CryptoKey; publicKeyString: string } | null) => void;
+  setHostKeyPair: (keyPair: ECDSAHostKeyPair | null) => void;
   addStreamingPeer: (peer: StreamingPeer) => void;
   updateStreamingPeer: (peerId: string, updates: Partial<StreamingPeer>) => void;
   removeStreamingPeer: (peerId: string) => void;
@@ -175,14 +176,12 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
   clearChannels: () => set({ channels: [] }),
 
   // Host state
-  hostChannelId: null,
   hostKeyPair: null,
   streamingPeers: [],
   activePeerId: null,
   broadcastPeers: 0,
 
   // Host actions
-  setHostChannelId: (id) => set({ hostChannelId: id }),
   setHostKeyPair: (keyPair) => set({ hostKeyPair: keyPair }),
   addStreamingPeer: (peer) =>
     set((state) => {
@@ -359,9 +358,11 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
         }
         console.log("[DEBUG] Message matches - verifying signature");
         const verifyKey = await getVerifyKey(hostKey);
+        const verifyPayload = { peerId: message.peerId, nonce: message.nonce, answer: message.answer };
+        console.log("[DEBUG] Verifying payload", { verifyPayload: JSON.stringify(verifyPayload) });
         const isValid = await verifyHostSignature(
           verifyKey,
-          { peerId: message.peerId, nonce: message.nonce, answer: message.answer },
+          verifyPayload,
           message.signature
         );
         if (!isValid) {
@@ -723,24 +724,32 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
       }
       console.log("Host ICE gathering complete", { peerId });
 
+      // Normalize RTCSessionDescription to plain object for consistent signing
+      const answerObj = {
+        type: pc.localDescription.type,
+        sdp: pc.localDescription.sdp,
+      };
+      
       const signedPayload = {
         peerId,
         nonce: payload.nonce,
-        answer: pc.localDescription,
+        answer: answerObj,
       };
-      console.log("Host signing answer", { peerId });
+      console.log("Host signing answer", { peerId, signedPayload: JSON.stringify(signedPayload) });
       const signature = await signPayload(keyPair.privateKey, signedPayload);
 
       console.log("[DEBUG HOST] Host sending answer to peer", { peerId, signalChannel: !!signalChannel, channelName: getSignalChannelName(state.hostKeyPair!.publicKeyString) });
-      await signalChannel.send({
-        type: "broadcast",
-        event: HOST_ANSWER_EVENT,
-        payload: {
-          ...signedPayload,
-          signature,
-          timestamp: Date.now(),
-        } satisfies HostAnswerMessage,
-      });
+        await signalChannel.send({
+          type: "broadcast",
+          event: HOST_ANSWER_EVENT,
+          payload: {
+            peerId: signedPayload.peerId,
+            nonce: signedPayload.nonce,
+            answer: signedPayload.answer, // Use normalized answer object
+            signature,
+            timestamp: Date.now(),
+          } satisfies HostAnswerMessage,
+        });
 
       console.log("[DEBUG HOST] Host sent answer to peer successfully", { peerId, answerType: signedPayload.answer.type });
       get().broadcastLocalHostStatus(channelId);

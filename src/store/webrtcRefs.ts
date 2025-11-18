@@ -3,6 +3,7 @@
  * These are not in Zustand because they're non-serializable objects
  */
 import type { RealtimeChannel } from "@supabase/supabase-js";
+import type { HostKeyPair } from "../lib/ecdsa";
 
 export type HostSession = {
   peerId: string;
@@ -33,7 +34,8 @@ export type ViewSession = {
 export const hostSessionsRef = new Map<string, HostSession>();
 export const viewSessionsRef = new Map<string, RTCPeerConnection>();
 export const peerVideoRefs = new Map<string, HTMLVideoElement>();
-export const hostKeyPairRef: { current: { publicKey: CryptoKey; privateKey: CryptoKey; publicKeyString: string } | null } = { current: null };
+
+export const hostKeyPairRef: { current: HostKeyPair | null } = { current: null };
 export const hostSignalChannelRef: { current: RealtimeChannel | null } = { current: null };
 export const presenceChannelRef: { current: RealtimeChannel | null } = { current: null };
 export const heartbeatRef: { current: ReturnType<typeof setInterval> | null } = { current: null };
@@ -43,7 +45,7 @@ export const hostVideoRef: { current: HTMLVideoElement | null } = { current: nul
 export const shareSessionRef: { current: ShareSession | null } = { current: null };
 export const viewSessionRef: { current: ViewSession | null } = { current: null };
 export const viewVideoRef: { current: HTMLVideoElement | null } = { current: null };
-export const verifyKeyCacheRef = new Map<string, CryptoKey>();
+export const verifyKeyCacheRef = new Map<string, { x: bigint; y: bigint }>();
 
 // Helper functions
 export const clearHostRefs = () => {
