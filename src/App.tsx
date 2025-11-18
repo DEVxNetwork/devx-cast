@@ -2,23 +2,13 @@ import "./index.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "./lib/supabase";
-import {
-  createOffer,
-  fetchExistingAnswer,
-  fetchPendingOffers,
-  saveAnswer,
-  subscribeToAnswer,
-  subscribeToOffers,
-  updateOfferStatus,
-} from "./lib/signaling";
-import type { OfferRecord } from "./lib/types";
 
 type StreamingPeer = {
   id: string;
   label: string;
   screenTitle: string;
   stream?: MediaStream | null;
-  offerId?: string;
+  sessionId?: string;
 };
 
 type Channel = {
@@ -41,18 +31,21 @@ type HostStatusPayload = {
 type HostStopPayload = { hostId: string };
 
 type HostSession = {
-  offer: OfferRecord;
+  peerId: string;
+  alias: string;
+  nonce: string;
   pc: RTCPeerConnection;
   stream: MediaStream;
-  peerId: string;
   channelId: string;
 };
 
 type ShareSession = {
-  offerId: string;
+  peerId: string;
+  nonce: string;
+  hostKey: string;
   pc: RTCPeerConnection;
   stream: MediaStream;
-  unsubscribeAnswer?: () => Promise<void>;
+  signalChannel: RealtimeChannel;
 };
 
 type ShareStatus = "idle" | "prompting" | "publishing" | "awaiting" | "connected" | "error";
@@ -66,6 +59,126 @@ const shareStatusCopy: Record<ShareStatus, string> = {
   error: "Share failed",
 };
 
+type HostKeyPair = {
+  publicKey: CryptoKey;
+  privateKey: CryptoKey;
+  publicKeyString: string;
+};
+
+type PeerOfferMessage = {
+  peerId: string;
+  alias: string;
+  offer: RTCSessionDescriptionInit;
+  nonce: string;
+  timestamp: number;
+};
+
+type HostAnswerMessage = {
+  peerId: string;
+  nonce: string;
+  answer: RTCSessionDescriptionInit;
+  signature: string;
+  timestamp: number;
+};
+
+const textEncoder = new TextEncoder();
+
+const arrayBufferToBase64Url = (buffer: ArrayBuffer) => {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    const byte = bytes[i]!;
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+};
+
+const base64UrlToArrayBuffer = (value: string) => {
+  let base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  while (base64.length % 4 !== 0) {
+    base64 += "=";
+  }
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+};
+
+const generateHostKeyPair = async (): Promise<HostKeyPair> => {
+  const keyPair = await crypto.subtle.generateKey(
+    {
+      name: "ECDSA",
+      namedCurve: "P-256",
+    },
+    true,
+    ["sign", "verify"]
+  );
+  const publicBuffer = await crypto.subtle.exportKey("spki", keyPair.publicKey);
+  return {
+    privateKey: keyPair.privateKey,
+    publicKey: keyPair.publicKey,
+    publicKeyString: arrayBufferToBase64Url(publicBuffer),
+  };
+};
+
+const getSignalChannelName = (hostKey: string) => `signal-${hostKey}`;
+
+const PEER_OFFER_EVENT = "peer-offer";
+const HOST_ANSWER_EVENT = "host-answer";
+const HOST_TERMINATE_EVENT = "host-terminate";
+
+const subscribeToRealtimeChannel = (channel: RealtimeChannel) =>
+  new Promise<void>((resolve, reject) => {
+    channel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        resolve();
+      } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+        reject(new Error(`Channel ${channel.topic} status: ${status}`));
+      }
+    });
+  });
+
+const encodePayload = (payload: unknown) => textEncoder.encode(JSON.stringify(payload));
+
+const signPayload = (privateKey: CryptoKey, payload: object) =>
+  crypto.subtle
+    .sign(
+      {
+        name: "ECDSA",
+        hash: "SHA-256",
+      },
+      privateKey,
+      encodePayload(payload)
+    )
+    .then(arrayBufferToBase64Url);
+
+const importHostPublicKey = (publicKeyString: string) =>
+  crypto.subtle.importKey(
+    "spki",
+    base64UrlToArrayBuffer(publicKeyString),
+    {
+      name: "ECDSA",
+      namedCurve: "P-256",
+    },
+    true,
+    ["verify"]
+  );
+
+const verifyHostSignature = async (publicKey: CryptoKey, payload: object, signature: string) => {
+  const signatureBuffer = base64UrlToArrayBuffer(signature);
+  return crypto.subtle.verify(
+    {
+      name: "ECDSA",
+      hash: "SHA-256",
+    },
+    publicKey,
+    signatureBuffer,
+    encodePayload(payload)
+  );
+};
+
 const HOST_DIRECTORY_CHANNEL = "host-directory";
 const HOST_STATUS_EVENT = "host-status";
 const HOST_STOP_EVENT = "host-stop";
@@ -74,7 +187,6 @@ const HOST_BROADCAST_INTERVAL_MS = 2_000;
 const STALE_SWEEP_INTERVAL_MS = 5_000;
 
 const randomId = () => Math.random().toString(36).slice(2, 10);
-const createHostKey = () => `pk_${randomId()}${randomId()}`.toUpperCase();
 const sortByRecency = (a: Channel, b: Channel) => (a.lastActive < b.lastActive ? 1 : -1);
 const upsertChannel = (channels: Channel[], updated: Channel) => {
   const filtered = channels.filter((channel) => channel.id !== updated.id);
@@ -113,10 +225,23 @@ export function App() {
   const presenceChannelRef = useRef<RealtimeChannel | null>(null);
   const hostedChannelRef = useRef<Channel | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const hostOfferUnsubRef = useRef<(() => Promise<void>) | null>(null);
   const hostSessionsRef = useRef<Map<string, HostSession>>(new Map());
   const shareSessionRef = useRef<ShareSession | null>(null);
   const peerVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const hostKeyPairRef = useRef<HostKeyPair | null>(null);
+  const hostSignalChannelRef = useRef<RealtimeChannel | null>(null);
+  const verifyKeyCacheRef = useRef<Map<string, CryptoKey>>(new Map());
+
+  const getVerifyKey = useCallback(
+    async (hostKey: string) => {
+      const cached = verifyKeyCacheRef.current.get(hostKey);
+      if (cached) return cached;
+      const imported = await importHostPublicKey(hostKey);
+      verifyKeyCacheRef.current.set(hostKey, imported);
+      return imported;
+    },
+    []
+  );
 
   const broadcastLocalHostStatus = useCallback((channelOverride?: Channel) => {
     const presence = presenceChannelRef.current;
@@ -150,27 +275,6 @@ export function App() {
       })
     );
   }, []);
-
-  const upsertStreamingPeer = useCallback(
-    (channelId: string, peer: StreamingPeer) => {
-      mutateChannel(channelId, (channel) => {
-        const peers = channel.streamingPeers.filter((item) => item.id !== peer.id);
-        peers.push(peer);
-        return { ...channel, streamingPeers: peers };
-      });
-    },
-    [mutateChannel]
-  );
-
-  const updateStreamingPeer = useCallback(
-    (channelId: string, peerId: string, updater: (peer: StreamingPeer) => StreamingPeer) => {
-      mutateChannel(channelId, (channel) => {
-        const peers = channel.streamingPeers.map((peer) => (peer.id === peerId ? updater(peer) : peer));
-        return { ...channel, streamingPeers: peers };
-      });
-    },
-    [mutateChannel]
-  );
 
   const removeStreamingPeer = useCallback(
     (channelId: string, peerId: string) => {
@@ -216,40 +320,25 @@ export function App() {
   }, []);
 
   const closeHostSession = useCallback(
-    (offerId: string) => {
-      const session = hostSessionsRef.current.get(offerId);
+    (peerId: string) => {
+      const session = hostSessionsRef.current.get(peerId);
       if (!session) return;
       session.stream.getTracks().forEach((track) => track.stop());
       session.pc.ontrack = null;
       session.pc.onconnectionstatechange = null;
       session.pc.close();
-      hostSessionsRef.current.delete(offerId);
+      hostSessionsRef.current.delete(peerId);
       removeStreamingPeer(session.channelId, session.peerId);
     },
     [removeStreamingPeer]
   );
 
   const teardownHostSessions = useCallback(() => {
-    Array.from(hostSessionsRef.current.keys()).forEach((offerId) => closeHostSession(offerId));
-    if (hostOfferUnsubRef.current) {
-      hostOfferUnsubRef.current().catch(() => null);
-      hostOfferUnsubRef.current = null;
-    }
+    Array.from(hostSessionsRef.current.keys()).forEach((peerId) => closeHostSession(peerId));
   }, [closeHostSession]);
 
-  const stopHosting = useCallback(() => {
-    const current = hostedChannelRef.current;
-    if (!current) return;
-    sendHostStop(current.id);
-    hostedChannelRef.current = null;
-    setHostedChannelId(null);
-    stopHeartbeat();
-    teardownHostSessions();
-    setChannels((prev) => prev.filter((channel) => channel.id !== current.id));
-  }, [sendHostStop, stopHeartbeat, teardownHostSessions]);
-
   const attachStreamToPeer = useCallback(
-    (channelId: string, peerId: string, stream: MediaStream, label: string, offerId: string) => {
+    (channelId: string, peerId: string, stream: MediaStream, label: string, sessionId: string) => {
       mutateChannel(channelId, (channel) => {
         const peers = channel.streamingPeers.filter((item) => item.id !== peerId);
         peers.push({
@@ -257,7 +346,7 @@ export function App() {
           label,
           screenTitle: "Live screen share",
           stream,
-          offerId,
+          sessionId,
         });
         return {
           ...channel,
@@ -272,72 +361,120 @@ export function App() {
     [broadcastLocalHostStatus, mutateChannel]
   );
 
-  const autoAcceptOffer = useCallback(
-    async (channel: Channel, offer: OfferRecord) => {
-      if (hostSessionsRef.current.has(offer.id)) return;
+  const handlePeerOffer = useCallback(
+    async (payload: PeerOfferMessage) => {
+      const channel = hostedChannelRef.current;
+      const keyPair = hostKeyPairRef.current;
+      const signalChannel = hostSignalChannelRef.current;
+      if (!channel || !keyPair || !signalChannel) return;
+
+      const peerId = payload.peerId;
+      if (hostSessionsRef.current.has(peerId)) {
+        closeHostSession(peerId);
+      }
+
       try {
         const pc = createPeerConnection();
         const stream = new MediaStream();
-        const peerId = `peer_${randomId()}`;
-        hostSessionsRef.current.set(offer.id, { offer, pc, stream, peerId, channelId: channel.id });
+        hostSessionsRef.current.set(peerId, {
+          peerId,
+          alias: payload.alias || "Guest share",
+          nonce: payload.nonce,
+          pc,
+          stream,
+          channelId: channel.id,
+        });
 
         pc.ontrack = (event) => {
           if (event.streams && event.streams[0]) {
-            attachStreamToPeer(channel.id, peerId, event.streams[0], offer.caster_name ?? "Guest share", offer.id);
+            attachStreamToPeer(channel.id, peerId, event.streams[0], payload.alias ?? "Guest share", peerId);
           } else {
             stream.addTrack(event.track);
-            attachStreamToPeer(channel.id, peerId, stream, offer.caster_name ?? "Guest share", offer.id);
+            attachStreamToPeer(channel.id, peerId, stream, payload.alias ?? "Guest share", peerId);
           }
         };
 
         pc.onconnectionstatechange = () => {
-          if (pc.connectionState === "failed" || pc.connectionState === "disconnected" || pc.connectionState === "closed") {
-            closeHostSession(offer.id);
+          if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+            closeHostSession(peerId);
           }
         };
 
-        await pc.setRemoteDescription(offer.offer);
+        await pc.setRemoteDescription(payload.offer);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         await waitForIceGathering(pc);
         if (!pc.localDescription) throw new Error("Missing local description");
-        await saveAnswer(offer.id, pc.localDescription);
-        await updateOfferStatus(offer.id, "accepted");
+
+        const signedPayload = {
+          peerId,
+          nonce: payload.nonce,
+          answer: pc.localDescription,
+        };
+        const signature = await signPayload(keyPair.privateKey, signedPayload);
+
+        await signalChannel.send({
+          type: "broadcast",
+          event: HOST_ANSWER_EVENT,
+          payload: {
+            ...signedPayload,
+            signature,
+            timestamp: Date.now(),
+          } satisfies HostAnswerMessage,
+        });
       } catch (err) {
-        console.error("Failed to accept offer", err);
-        closeHostSession(offer.id);
-        await updateOfferStatus(offer.id, "denied").catch(() => null);
+        console.error("Failed to process peer offer", err);
+        closeHostSession(peerId);
       }
     },
     [attachStreamToPeer, closeHostSession]
   );
 
-  const startHostOfferListener = useCallback(
-    async (channel: Channel) => {
-      const hostKey = channel.hostKey.toUpperCase();
-
-      const handleOfferRecord = (record: OfferRecord) => {
-        if ((record.room_code ?? "").toUpperCase() !== hostKey) return;
-        if (record.status === "pending") {
-          autoAcceptOffer(channel, record);
-        } else if (record.status === "completed" || record.status === "denied") {
-          closeHostSession(record.id);
-        }
-      };
-
-      try {
-        const pending = await fetchPendingOffers();
-        pending.forEach(handleOfferRecord);
-      } catch (err) {
-        console.error("Failed to fetch pending offers", err);
+  const startHostSignalChannel = useCallback(
+    async (hostKey: string) => {
+      if (hostSignalChannelRef.current) {
+        await hostSignalChannelRef.current.unsubscribe().catch(() => null);
+        hostSignalChannelRef.current = null;
       }
-
-      hostOfferUnsubRef.current = subscribeToOffers((record) => {
-        handleOfferRecord(record);
+      const channelName = getSignalChannelName(hostKey);
+      const signalChannel = supabase.channel(channelName, { config: { broadcast: { self: false } } });
+      signalChannel.on("broadcast", { event: PEER_OFFER_EVENT }, ({ payload }) => {
+        handlePeerOffer(payload as PeerOfferMessage);
       });
+      await subscribeToRealtimeChannel(signalChannel);
+      hostSignalChannelRef.current = signalChannel;
     },
-    [autoAcceptOffer, closeHostSession]
+    [handlePeerOffer]
   );
+
+  const stopHostSignalChannel = useCallback(async () => {
+    if (hostSignalChannelRef.current) {
+      await hostSignalChannelRef.current.unsubscribe().catch(() => null);
+      hostSignalChannelRef.current = null;
+    }
+  }, []);
+
+  const stopHosting = useCallback(() => {
+    const current = hostedChannelRef.current;
+    if (!current) return;
+    sendHostStop(current.id);
+    hostedChannelRef.current = null;
+    setHostedChannelId(null);
+    hostKeyPairRef.current = null;
+    if (hostSignalChannelRef.current) {
+      hostSignalChannelRef.current
+        .send({
+          type: "broadcast",
+          event: HOST_TERMINATE_EVENT,
+          payload: { timestamp: Date.now() },
+        })
+        .catch(() => null);
+    }
+    stopHostSignalChannel().catch(() => null);
+    stopHeartbeat();
+    teardownHostSessions();
+    setChannels((prev) => prev.filter((channel) => channel.id !== current.id));
+  }, [sendHostStop, stopHeartbeat, stopHostSignalChannel, teardownHostSessions]);
 
   const handleHostStatus = useCallback((payload: HostStatusPayload) => {
     setChannels((prev) => {
@@ -439,6 +576,12 @@ export function App() {
   }, [stopHosting]);
 
   useEffect(() => {
+    return () => {
+      stopHostSignalChannel().catch(() => null);
+    };
+  }, [stopHostSignalChannel]);
+
+  useEffect(() => {
     channels.forEach((channel) => {
       channel.streamingPeers.forEach((peer) => {
         const video = peerVideoRefs.current.get(peer.id);
@@ -449,18 +592,24 @@ export function App() {
     });
   }, [channels]);
 
-  const handleAddChannel = useCallback(() => {
+  const handleAddChannel = useCallback(async () => {
     if (isCreatingChannel) return;
     setIsCreatingChannel(true);
     setError(null);
     try {
+      if (typeof window === "undefined" || !window.crypto?.subtle) {
+        throw new Error("Web Crypto API is not available in this environment.");
+      }
       if (hostedChannelRef.current) {
         stopHosting();
       }
 
+      const keyPair = await generateHostKeyPair();
+      hostKeyPairRef.current = keyPair;
+
       const nextChannel: Channel = {
         id: `channel_${randomId()}`,
-        hostKey: createHostKey(),
+        hostKey: keyPair.publicKeyString,
         broadcastPeers: Math.floor(Math.random() * 240) + 16,
         lastActive: Date.now(),
         streamingPeers: [],
@@ -472,16 +621,16 @@ export function App() {
       setChannels((prev) => upsertChannel(prev, nextChannel));
       setSelectedChannelId(nextChannel.id);
 
+      await startHostSignalChannel(keyPair.publicKeyString);
       broadcastLocalHostStatus(nextChannel);
       startHeartbeat();
-      startHostOfferListener(nextChannel);
     } catch (err) {
       console.error("Failed to create channel", err);
       setError(err instanceof Error ? err.message : "Failed to create channel");
     } finally {
       setIsCreatingChannel(false);
     }
-  }, [broadcastLocalHostStatus, isCreatingChannel, startHeartbeat, startHostOfferListener, stopHosting]);
+  }, [broadcastLocalHostStatus, isCreatingChannel, startHeartbeat, startHostSignalChannel, stopHosting]);
 
   const stopShareSession = useCallback(async () => {
     const session = shareSessionRef.current;
@@ -490,20 +639,18 @@ export function App() {
     session.stream.getTracks().forEach((track) => track.stop());
     session.pc.onconnectionstatechange = null;
     session.pc.close();
-    if (session.unsubscribeAnswer) {
-      await session.unsubscribeAnswer().catch(() => null);
-    }
-    await updateOfferStatus(session.offerId, "completed").catch(() => null);
+    await session.signalChannel.unsubscribe().catch(() => null);
     setShareStatus("idle");
     setShareError(null);
   }, []);
 
-  const handleShareScreen = useCallback(async () => {
+  const handleShareScreen = useCallback(async (channelOverride?: Channel) => {
+    const targetChannel = channelOverride ?? selectedChannel;
     if (shareSessionRef.current) {
       await stopShareSession();
       return;
     }
-    if (!selectedChannel) {
+    if (!targetChannel) {
       setShareError("Select a channel to share your screen.");
       return;
     }
@@ -518,55 +665,81 @@ export function App() {
       if (!stream.getVideoTracks().length) {
         throw new Error("No video track captured");
       }
+
       const pc = createPeerConnection();
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+
+      const hostKey = targetChannel.hostKey;
+      const signalChannel = supabase.channel(getSignalChannelName(hostKey), { config: { broadcast: { self: true } } });
+      const peerId = `peer_${randomId()}`;
+      const nonce = `nonce_${randomId()}${randomId()}`;
+
+      signalChannel.on("broadcast", { event: HOST_ANSWER_EVENT }, async ({ payload }) => {
+        const message = payload as HostAnswerMessage;
+        if (message.peerId !== peerId || message.nonce !== nonce) return;
+        const verifyKey = await getVerifyKey(hostKey);
+        const isValid = await verifyHostSignature(
+          verifyKey,
+          { peerId: message.peerId, nonce: message.nonce, answer: message.answer },
+          message.signature
+        );
+        if (!isValid) {
+          setShareError("Host signature is invalid.");
+          await stopShareSession();
+          return;
+        }
+        const description =
+          typeof RTCSessionDescription !== "undefined" ? new RTCSessionDescription(message.answer) : message.answer;
+        await pc.setRemoteDescription(description);
+        setShareStatus("connected");
+      });
+
+      signalChannel.on("broadcast", { event: HOST_TERMINATE_EVENT }, () => {
+        stopShareSession().catch(() => null);
+      });
+
+      await subscribeToRealtimeChannel(signalChannel);
+
+      shareSessionRef.current = {
+        peerId,
+        nonce,
+        hostKey,
+        pc,
+        stream,
+        signalChannel,
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+          stopShareSession().catch(() => null);
+        }
+      };
+
+      setShareStatus("publishing");
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       await waitForIceGathering(pc);
       if (!pc.localDescription) throw new Error("Missing local description");
 
-      setShareStatus("publishing");
-      const record = await createOffer({
-        offer: pc.localDescription,
-        casterName: shareAlias.trim() || "Guest share",
-        roomCode: selectedChannel.hostKey,
-      });
       setShareStatus("awaiting");
-
-      const applyAnswer = async (answer: RTCSessionDescriptionInit) => {
-        const description =
-          typeof RTCSessionDescription !== "undefined" ? new RTCSessionDescription(answer) : answer;
-        await pc.setRemoteDescription(description);
-        setShareStatus("connected");
-      };
-
-      const unsubscribe = subscribeToAnswer(record.id, async (payload) => {
-        await applyAnswer(payload.answer);
+      await signalChannel.send({
+        type: "broadcast",
+        event: PEER_OFFER_EVENT,
+        payload: {
+          peerId,
+          alias: shareAlias.trim() || "Guest share",
+          offer: pc.localDescription,
+          nonce,
+          timestamp: Date.now(),
+        } satisfies PeerOfferMessage,
       });
-      const existingAnswer = await fetchExistingAnswer(record.id);
-      if (existingAnswer) {
-        await applyAnswer(existingAnswer.answer);
-      }
-
-      shareSessionRef.current = {
-        offerId: record.id,
-        pc,
-        stream,
-        unsubscribeAnswer: unsubscribe,
-      };
-
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "failed" || pc.connectionState === "disconnected" || pc.connectionState === "closed") {
-          stopShareSession().catch(() => null);
-        }
-      };
     } catch (err) {
       console.error("Failed to start screen share", err);
       setShareStatus("error");
       setShareError(err instanceof Error ? err.message : "Failed to start screen share");
       await stopShareSession();
     }
-  }, [selectedChannel, shareAlias, stopShareSession]);
+  }, [getVerifyKey, selectedChannel, shareAlias, stopShareSession]);
 
   useEffect(() => {
     return () => {
@@ -599,7 +772,7 @@ export function App() {
           </div>
           <button className="primary-button" onClick={handleAddChannel} disabled={isCreatingChannel}>
             {isCreatingChannel ? "Starting…" : "Add channel"}
-          </button>
+        </button>
         </div>
         <div className="channel-list">
           {channels.length === 0 && <p className="muted">Waiting for hosts to appear…</p>}
@@ -609,12 +782,17 @@ export function App() {
               <button
                 key={channel.id}
                 className={`channel-item ${isSelected ? "selected" : ""}`}
-                onClick={() => setSelectedChannelId(channel.id)}
+                onClick={() => {
+                  setSelectedChannelId(channel.id);
+                  if (!hostedChannelId && shareStatus === "idle") {
+                    void handleShareScreen(channel);
+                  }
+                }}
               >
                 <p>Host public key</p>
                 <code>{channel.hostKey}</code>
                 <span>{channel.activePeerId ? "Broadcasting" : "Waiting"}</span>
-              </button>
+        </button>
             );
           })}
         </div>
@@ -650,13 +828,13 @@ export function App() {
                 <div>
                   <p className="label">Broadcast peer count</p>
                   <strong>{selectedChannel.broadcastPeers}</strong>
-                </div>
+          </div>
                 <div>
                   <p className="label">Active streaming peer</p>
                   <span>{activePeer ? activePeer.label : "None"}</span>
-                </div>
-              </div>
-            </section>
+          </div>
+        </div>
+      </section>
 
             <section className="console-section peer-options">
               <article>
@@ -671,7 +849,14 @@ export function App() {
                 </label>
                 {shareError && <p className="error-text">{shareError}</p>}
                 <p className="muted">Status: {shareStatusCopy[shareStatus]}</p>
-                <button className="secondary-button" type="button" onClick={handleShareScreen} disabled={shareButtonDisabled}>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => {
+                    void handleShareScreen();
+                  }}
+                  disabled={shareButtonDisabled}
+                >
                   {isShareActive ? "Stop sharing" : "Share screen"}
                 </button>
               </article>
