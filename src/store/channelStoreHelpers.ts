@@ -54,7 +54,26 @@ export const useSetShareError = () => useChannelStore((state) => state.setShareE
 export const useSetShareAlias = () => useChannelStore((state) => state.setShareAlias);
 export const useSetViewStatus = () => useChannelStore((state) => state.setViewStatus);
 export const useSetViewError = () => useChannelStore((state) => state.setViewError);
+export const useSetViewStream = () => useChannelStore((state) => state.setViewStream);
 export const useClearPeerState = () => useChannelStore((state) => state.clearPeerState);
+export const useViewStream = () => useChannelStore((state) => state.viewStream);
+
+// Peer handlers
+export const useHandleShareScreen = () => useChannelStore((state) => state.handleShareScreen);
+export const useHandleViewStream = () => useChannelStore((state) => state.handleViewStream);
+export const useStopShareSession = () => useChannelStore((state) => state.stopShareSession);
+export const useStopViewSession = () => useChannelStore((state) => state.stopViewSession);
+
+// Host handlers
+export const useInitializeHost = () => useChannelStore((state) => state.initializeHost);
+export const useHandlePeerOffer = () => useChannelStore((state) => state.handlePeerOffer);
+export const useHandleViewOffer = () => useChannelStore((state) => state.handleViewOffer);
+export const useBroadcastLocalHostStatus = () => useChannelStore((state) => state.broadcastLocalHostStatus);
+export const useStartHostSignalChannel = () => useChannelStore((state) => state.startHostSignalChannel);
+export const useStartHeartbeat = () => useChannelStore((state) => state.startHeartbeat);
+export const useStopHeartbeat = () => useChannelStore((state) => state.stopHeartbeat);
+export const useTeardownHostSessions = () => useChannelStore((state) => state.teardownHostSessions);
+export const useHandleHighlightPeer = () => useChannelStore((state) => state.handleHighlightPeer);
 
 // WebRTC sessions are managed via refs in components/services
 
