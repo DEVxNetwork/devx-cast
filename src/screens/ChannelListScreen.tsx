@@ -1,13 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { RealtimeChannel } from "@supabase/supabase-js";
+import { useEffect } from "react";
 import { supabase } from "../lib/supabase";
-
-type Channel = {
-  id: string;
-  hostKey: string;
-  broadcastPeers: number;
-  lastActive: number;
-};
+import { useChannels } from "../store/channelStoreHelpers";
+import { useChannelStore } from "../store/channelStore";
+import { presenceChannelRef } from "../store/webrtcRefs";
+import type { Channel } from "../store/channelStore";
 
 type HostStatusPayload = {
   hostId: string;
@@ -24,38 +20,13 @@ const HOST_STOP_EVENT = "host-stop";
 const HOST_TIMEOUT_MS = 60_000;
 const STALE_SWEEP_INTERVAL_MS = 5_000;
 
-const sortByRecency = (a: Channel, b: Channel) => (a.lastActive < b.lastActive ? 1 : -1);
-const upsertChannel = (channels: Channel[], updated: Channel) => {
-  const filtered = channels.filter((channel) => channel.id !== updated.id);
-  filtered.push(updated);
-  return filtered.sort(sortByRecency);
-};
-
 type ChannelListScreenProps = {
   onStartChannel: () => void;
   onSelectChannel: (hostKey: string) => void;
 };
 
 export function ChannelListScreen({ onStartChannel, onSelectChannel }: ChannelListScreenProps) {
-  const [channels, setChannels] = useState<Channel[]>([]);
-  const presenceChannelRef = useRef<RealtimeChannel | null>(null);
-
-  const handleHostStatus = useCallback((payload: HostStatusPayload) => {
-    setChannels((prev) => {
-      const existing = prev.find((channel) => channel.id === payload.hostId);
-      const merged: Channel = {
-        id: payload.hostId,
-        hostKey: payload.hostKey,
-        broadcastPeers: payload.broadcastPeers ?? existing?.broadcastPeers ?? 0,
-        lastActive: payload.timestamp,
-      };
-      return upsertChannel(prev, merged);
-    });
-  }, []);
-
-  const handleHostStop = useCallback((payload: HostStopPayload) => {
-    setChannels((prev) => prev.filter((channel) => channel.id !== payload.hostId));
-  }, []);
+  const channels = useChannels();
 
   useEffect(() => {
     const channel = supabase.channel(HOST_DIRECTORY_CHANNEL, {
@@ -65,10 +36,21 @@ export function ChannelListScreen({ onStartChannel, onSelectChannel }: ChannelLi
 
     channel
       .on("broadcast", { event: HOST_STATUS_EVENT }, ({ payload }) => {
-        handleHostStatus(payload as HostStatusPayload);
+        const p = payload as HostStatusPayload;
+        // Access actions directly from store to avoid dependency issues
+        const { addChannel } = useChannelStore.getState();
+        addChannel({
+          id: p.hostId,
+          hostKey: p.hostKey,
+          broadcastPeers: p.broadcastPeers ?? 0,
+          lastActive: p.timestamp,
+        });
       })
       .on("broadcast", { event: HOST_STOP_EVENT }, ({ payload }) => {
-        handleHostStop(payload as HostStopPayload);
+        const p = payload as HostStopPayload;
+        // Access actions directly from store to avoid dependency issues
+        const { removeChannel } = useChannelStore.getState();
+        removeChannel(p.hostId);
       })
       .subscribe();
 
@@ -76,17 +58,22 @@ export function ChannelListScreen({ onStartChannel, onSelectChannel }: ChannelLi
       channel.unsubscribe();
       presenceChannelRef.current = null;
     };
-  }, [handleHostStatus, handleHostStop]);
+  }, []); // Empty deps - access store directly
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setChannels((prev) => {
-        const cutoff = Date.now() - HOST_TIMEOUT_MS;
-        return prev.filter((channel) => channel.lastActive >= cutoff);
+      const cutoff = Date.now() - HOST_TIMEOUT_MS;
+      // Access channels and actions directly from store to avoid dependency loop
+      const currentChannels = useChannelStore.getState().channels;
+      const { removeChannel } = useChannelStore.getState();
+      currentChannels.forEach((ch) => {
+        if (ch.lastActive < cutoff) {
+          removeChannel(ch.id);
+        }
       });
     }, STALE_SWEEP_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, []);
+  }, []); // Empty deps - access store directly
 
   return (
     <div className="app">

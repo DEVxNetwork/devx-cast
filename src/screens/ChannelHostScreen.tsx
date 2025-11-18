@@ -1,14 +1,30 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
-
-type StreamingPeer = {
-  id: string;
-  label: string;
-  screenTitle: string;
-  stream?: MediaStream | null;
-  sessionId?: string;
-};
+import {
+  useStreamingPeers,
+  useActivePeerId,
+  useBroadcastPeers,
+  useHostKeyPair,
+  useAddStreamingPeer,
+  useUpdateStreamingPeer,
+  useRemoveStreamingPeer,
+  useSetActivePeerId,
+  useSetBroadcastPeers,
+  useSetHostKeyPair,
+  useActivePeer,
+} from "../store/channelStoreHelpers";
+import { useChannelStore } from "../store/channelStore";
+import {
+  hostSessionsRef,
+  viewSessionsRef,
+  hostKeyPairRef,
+  hostSignalChannelRef,
+  presenceChannelRef,
+  heartbeatRef,
+  peerVideoRefs,
+  hostVideoRef,
+} from "../store/webrtcRefs";
 
 type HostStatusPayload = {
   hostId: string;
@@ -16,15 +32,6 @@ type HostStatusPayload = {
   broadcastPeers: number;
   activePeerId: string | null;
   timestamp: number;
-};
-
-type HostSession = {
-  peerId: string;
-  alias: string;
-  nonce: string;
-  pc: RTCPeerConnection;
-  stream: MediaStream;
-  channelId: string;
 };
 
 type HostKeyPair = {
@@ -101,7 +108,7 @@ const VIEW_ANSWER_EVENT = "view-answer";
 
 const subscribeToRealtimeChannel = (channel: RealtimeChannel) =>
   new Promise<void>((resolve, reject) => {
-    channel.subscribe((status) => {
+    channel.subscribe((status: string) => {
       if (status === "SUBSCRIBED") {
         resolve();
       } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
@@ -155,27 +162,23 @@ type ChannelHostScreenProps = {
 };
 
 export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps) {
-  const [streamingPeers, setStreamingPeers] = useState<StreamingPeer[]>([]);
-  const [activePeerId, setActivePeerId] = useState<string | null>(null);
-  const [broadcastPeers, setBroadcastPeers] = useState<number>(0);
-
-  const presenceChannelRef = useRef<RealtimeChannel | null>(null);
-  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const hostSessionsRef = useRef<Map<string, HostSession>>(new Map());
-  const peerVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const hostVideoRef = useRef<HTMLVideoElement | null>(null);
-  const hostKeyPairRef = useRef<HostKeyPair | null>(null);
-  const hostSignalChannelRef = useRef<RealtimeChannel | null>(null);
-  const viewSessionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
-
-  const activePeer = useMemo(
-    () => streamingPeers.find((peer) => peer.id === activePeerId) ?? null,
-    [streamingPeers, activePeerId]
-  );
+  const streamingPeers = useStreamingPeers();
+  const activePeerId = useActivePeerId();
+  const broadcastPeers = useBroadcastPeers();
+  const hostKeyPair = useHostKeyPair();
+  const addStreamingPeer = useAddStreamingPeer();
+  const updateStreamingPeer = useUpdateStreamingPeer();
+  const removeStreamingPeer = useRemoveStreamingPeer();
+  const setActivePeerId = useSetActivePeerId();
+  const setBroadcastPeers = useSetBroadcastPeers();
+  const setHostKeyPair = useSetHostKeyPair();
+  const activePeer = useActivePeer();
 
   const broadcastLocalHostStatus = useCallback(() => {
     const presence = presenceChannelRef.current;
-    if (!presence || !hostKeyPairRef.current) return;
+    // Access current values from store to avoid stale closures
+    const currentState = useChannelStore.getState();
+    if (!presence || !currentState.hostKeyPair) return;
 
     presence
       .send({
@@ -183,114 +186,173 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
         event: HOST_STATUS_EVENT,
         payload: {
           hostId: channelId,
-          hostKey: hostKeyPairRef.current.publicKeyString,
-          broadcastPeers,
-          activePeerId,
+          hostKey: currentState.hostKeyPair.publicKeyString,
+          broadcastPeers: currentState.broadcastPeers,
+          activePeerId: currentState.activePeerId,
           timestamp: Date.now(),
         } satisfies HostStatusPayload,
       })
       .catch((err) => console.error("Failed to broadcast host heartbeat", err));
-  }, [channelId, broadcastPeers, activePeerId]);
+  }, [channelId]);
 
-  const removeStreamingPeer = useCallback(
+  const removeStreamingPeerCallback = useCallback(
     (peerId: string) => {
-      setStreamingPeers((prev) => {
-        const peers = prev.filter((peer) => peer.id !== peerId);
-        return peers;
-      });
-      setActivePeerId((current) => {
-        if (current === peerId) {
-          return streamingPeers.find((peer) => peer.id !== peerId)?.id ?? null;
-        }
-        return current;
-      });
+      removeStreamingPeer(peerId);
+      if (activePeerId === peerId) {
+        const remainingPeers = streamingPeers.filter((p) => p.id !== peerId);
+        setActivePeerId(remainingPeers[0]?.id ?? null);
+      }
     },
-    [streamingPeers]
+    [streamingPeers, activePeerId, removeStreamingPeer, setActivePeerId]
   );
 
   const closeHostSession = useCallback(
     (peerId: string) => {
-      const session = hostSessionsRef.current.get(peerId);
+      const session = hostSessionsRef.get(peerId);
       if (!session) return;
       session.stream.getTracks().forEach((track) => track.stop());
       session.pc.ontrack = null;
       session.pc.onconnectionstatechange = null;
       session.pc.close();
-      hostSessionsRef.current.delete(peerId);
-      removeStreamingPeer(session.peerId);
+      hostSessionsRef.delete(peerId);
+      removeStreamingPeerCallback(session.peerId);
     },
-    [removeStreamingPeer]
+    [removeStreamingPeerCallback]
   );
 
   const attachStreamToPeer = useCallback(
     (peerId: string, stream: MediaStream, label: string, sessionId: string) => {
-      setStreamingPeers((prev) => {
-        const peers = prev.filter((item) => item.id !== peerId);
-        peers.push({
-          id: peerId,
-          label,
-          screenTitle: "Live screen share",
-          stream,
-          sessionId,
-        });
-        return peers;
+      updateStreamingPeer(peerId, {
+        label,
+        screenTitle: "Live screen share",
+        stream,
+        sessionId,
       });
-      setActivePeerId((current) => current ?? peerId);
+      if (!activePeerId) {
+        setActivePeerId(peerId);
+      }
     },
-    []
+    [activePeerId, updateStreamingPeer, setActivePeerId]
   );
 
   const handlePeerOffer = useCallback(
     async (payload: PeerOfferMessage) => {
       const keyPair = hostKeyPairRef.current;
       const signalChannel = hostSignalChannelRef.current;
-      if (!keyPair || !signalChannel) return;
+      if (!keyPair || !signalChannel) {
+        console.warn("Host not ready to accept peer offer", { keyPair: !!keyPair, signalChannel: !!signalChannel });
+        return;
+      }
 
       const peerId = payload.peerId;
-      if (hostSessionsRef.current.has(peerId)) {
+      const alias = payload.alias || "Guest share";
+      console.log("Host received peer offer", { peerId, alias });
+      
+      // Close existing session if peer reconnects
+      if (hostSessionsRef.has(peerId)) {
+        console.log("Closing existing session for peer", peerId);
         closeHostSession(peerId);
+      }
+
+      // Add peer to list immediately (before tracks arrive) so it shows up in UI
+      const existing = streamingPeers.find((p) => p.id === peerId);
+      if (!existing) {
+        addStreamingPeer({
+          id: peerId,
+          label: alias,
+          screenTitle: "Connecting...",
+          stream: null,
+          sessionId: peerId,
+        });
       }
 
       try {
         const pc = createPeerConnection();
         const stream = new MediaStream();
-        hostSessionsRef.current.set(peerId, {
+        
+        // Store session before setting up handlers
+        hostSessionsRef.set(peerId, {
           peerId,
-          alias: payload.alias || "Guest share",
+          alias,
           nonce: payload.nonce,
           pc,
           stream,
           channelId,
         });
 
+        // Handle incoming tracks from peer
         pc.ontrack = (event) => {
+          console.log("Host received track from peer", { peerId, trackId: event.track.id });
           if (event.streams && event.streams[0]) {
-            attachStreamToPeer(peerId, event.streams[0], payload.alias ?? "Guest share", peerId);
-          } else {
+            attachStreamToPeer(peerId, event.streams[0], alias, peerId);
+          } else if (event.track) {
             stream.addTrack(event.track);
-            attachStreamToPeer(peerId, stream, payload.alias ?? "Guest share", peerId);
+            attachStreamToPeer(peerId, stream, alias, peerId);
           }
         };
 
-        pc.onconnectionstatechange = () => {
-          if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+        // Handle ICE candidates
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            console.log("Host ICE candidate", { peerId, candidate: event.candidate.candidate });
+          } else {
+            console.log("Host ICE candidate gathering complete", { peerId });
+          }
+        };
+
+        // Handle ICE connection state changes
+        pc.oniceconnectionstatechange = () => {
+          const iceState = pc.iceConnectionState;
+          console.log("Host ICE connection state changed", { peerId, iceConnectionState: iceState });
+          // Close on ICE connection failure - "disconnected" can be temporary, but "failed" is terminal
+          if (iceState === "failed") {
+            console.log("Host ICE connection failed - closing session", { peerId });
             closeHostSession(peerId);
           }
         };
 
+        // Handle connection state changes
+        pc.onconnectionstatechange = () => {
+          const state = pc.connectionState;
+          console.log("Host peer connection state changed", { peerId, state, iceConnectionState: pc.iceConnectionState, iceGatheringState: pc.iceGatheringState });
+          // Only close on terminal states - "disconnected" can be temporary during ICE negotiation
+          if (state === "failed" || state === "closed") {
+            console.log("Host peer connection closed", { peerId, state, iceConnectionState: pc.iceConnectionState });
+            closeHostSession(peerId);
+          } else if (state === "connected") {
+            console.log("Host peer connection established", { peerId, iceConnectionState: pc.iceConnectionState });
+          }
+        };
+
+        // Set remote description FIRST (before tracks arrive)
+        console.log("Host setting remote description", { peerId });
         await pc.setRemoteDescription(payload.offer);
+        console.log("Host set remote description", { peerId });
+        
+        // Create answer
+        console.log("Host creating answer", { peerId });
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
+        console.log("Host created answer", { peerId });
+        
+        // Wait for ICE gathering to complete
+        console.log("Host waiting for ICE gathering", { peerId });
         await waitForIceGathering(pc);
-        if (!pc.localDescription) throw new Error("Missing local description");
+        if (!pc.localDescription) {
+          throw new Error("Missing local description after ICE gathering");
+        }
+        console.log("Host ICE gathering complete", { peerId });
 
+        // Sign and send answer back to peer
         const signedPayload = {
           peerId,
           nonce: payload.nonce,
           answer: pc.localDescription,
         };
+        console.log("Host signing answer", { peerId });
         const signature = await signPayload(keyPair.privateKey, signedPayload);
 
+        console.log("Host sending answer to peer", { peerId, signalChannel: !!signalChannel });
         await signalChannel.send({
           type: "broadcast",
           event: HOST_ANSWER_EVENT,
@@ -300,8 +362,13 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
             timestamp: Date.now(),
           } satisfies HostAnswerMessage,
         });
+        
+        console.log("Host sent answer to peer", { peerId });
+        
+        // Broadcast updated host status with new peer count
+        broadcastLocalHostStatus();
       } catch (err) {
-        console.error("Failed to process peer offer", err);
+        console.error("Failed to process peer offer", { peerId, error: err });
         closeHostSession(peerId);
       }
     },
@@ -315,14 +382,14 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
       if (!keyPair || !signalChannel || !activePeer) return;
 
       const viewerId = payload.peerId;
-      if (viewSessionsRef.current.has(viewerId)) {
-        viewSessionsRef.current.get(viewerId)?.close();
-        viewSessionsRef.current.delete(viewerId);
+      if (viewSessionsRef.has(viewerId)) {
+        viewSessionsRef.get(viewerId)?.close();
+        viewSessionsRef.delete(viewerId);
       }
 
       try {
         const pc = createPeerConnection();
-        viewSessionsRef.current.set(viewerId, pc);
+        viewSessionsRef.set(viewerId, pc);
 
         // Add tracks from active peer stream
         if (activePeer.stream) {
@@ -333,7 +400,7 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
 
         pc.onconnectionstatechange = () => {
           if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
-            viewSessionsRef.current.delete(viewerId);
+            viewSessionsRef.delete(viewerId);
           }
         };
 
@@ -360,7 +427,7 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
         });
       } catch (err) {
         console.error("Failed to process view offer", err);
-        viewSessionsRef.current.delete(viewerId);
+        viewSessionsRef.delete(viewerId);
       }
     },
     [activePeer]
@@ -373,14 +440,22 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
         hostSignalChannelRef.current = null;
       }
       const channelName = getSignalChannelName(hostKey);
+      console.log("Host starting signal channel", { channelName });
       const signalChannel = supabase.channel(channelName, { config: { broadcast: { self: false } } });
+      
+      // Set up event listeners BEFORE subscribing
       signalChannel.on("broadcast", { event: PEER_OFFER_EVENT }, ({ payload }) => {
+        console.log("Host received PEER_OFFER_EVENT", payload);
         handlePeerOffer(payload as PeerOfferMessage);
       });
       signalChannel.on("broadcast", { event: VIEW_OFFER_EVENT }, ({ payload }) => {
+        console.log("Host received VIEW_OFFER_EVENT", payload);
         handleViewOffer(payload as { peerId: string; offer: RTCSessionDescriptionInit });
       });
+      
+      // Subscribe and wait for subscription to complete
       await subscribeToRealtimeChannel(signalChannel);
+      console.log("Host signal channel subscribed", { channelName });
       hostSignalChannelRef.current = signalChannel;
     },
     [handlePeerOffer, handleViewOffer]
@@ -402,9 +477,9 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
   }, [broadcastLocalHostStatus, stopHeartbeat]);
 
   const teardownHostSessions = useCallback(() => {
-    Array.from(hostSessionsRef.current.keys()).forEach((peerId) => closeHostSession(peerId));
-    Array.from(viewSessionsRef.current.values()).forEach((pc) => pc.close());
-    viewSessionsRef.current.clear();
+    Array.from(hostSessionsRef.keys()).forEach((peerId) => closeHostSession(peerId));
+    Array.from(viewSessionsRef.values()).forEach((pc) => pc.close());
+    viewSessionsRef.clear();
   }, [closeHostSession]);
 
   const handleHighlightPeer = useCallback((peerId: string) => {
@@ -420,6 +495,7 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
 
         const keyPair = await generateHostKeyPair();
         hostKeyPairRef.current = keyPair;
+        setHostKeyPair(keyPair);
         await startHostSignalChannel(keyPair.publicKeyString);
         broadcastLocalHostStatus();
         startHeartbeat();
@@ -437,7 +513,8 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
         hostSignalChannelRef.current.unsubscribe().catch(() => null);
       }
     };
-  }, [broadcastLocalHostStatus, startHeartbeat, startHostSignalChannel, stopHeartbeat, teardownHostSessions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
 
   useEffect(() => {
     const channel = supabase.channel(HOST_DIRECTORY_CHANNEL, {
@@ -453,7 +530,7 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
 
   useEffect(() => {
     streamingPeers.forEach((peer) => {
-      const video = peerVideoRefs.current.get(peer.id);
+      const video = peerVideoRefs.get(peer.id);
       if (video && peer.stream && video.srcObject !== peer.stream) {
         video.srcObject = peer.stream;
       }
@@ -466,22 +543,25 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
     } else if (hostVideoRef.current) {
       hostVideoRef.current.srcObject = null;
     }
+    // Broadcast status after video update, but don't include in deps to avoid loops
     broadcastLocalHostStatus();
-  }, [activePeer, broadcastLocalHostStatus]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePeer]);
 
   useEffect(() => {
     // Update viewer streams when active peer changes
     if (activePeer?.stream) {
-      viewSessionsRef.current.forEach((pc) => {
+      const stream = activePeer.stream;
+      viewSessionsRef.forEach((pc: RTCPeerConnection) => {
         // Remove old tracks
-        pc.getSenders().forEach((sender) => {
+        pc.getSenders().forEach((sender: RTCRtpSender) => {
           if (sender.track) {
             pc.removeTrack(sender);
           }
         });
         // Add new tracks from active peer
-        activePeer.stream.getTracks().forEach((track) => {
-          pc.addTrack(track, activePeer.stream!);
+        stream.getTracks().forEach((track) => {
+          pc.addTrack(track, stream);
         });
       });
     }
@@ -556,12 +636,12 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
                       <div className="peer-video-container">
                         {peer.stream ? (
                           <video
-                            ref={(el) => {
-                              if (!el) {
-                                peerVideoRefs.current.delete(peer.id);
-                                return;
-                              }
-                              peerVideoRefs.current.set(peer.id, el);
+                                    ref={(el) => {
+                                      if (!el) {
+                                        peerVideoRefs.delete(peer.id);
+                                        return;
+                                      }
+                                      peerVideoRefs.set(peer.id, el);
                               if (peer.stream && el.srcObject !== peer.stream) {
                                 el.srcObject = peer.stream;
                               }

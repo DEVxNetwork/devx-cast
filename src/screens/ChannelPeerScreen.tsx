@@ -1,6 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { RealtimeChannel } from "@supabase/supabase-js";
+import { useCallback, useEffect, useRef } from "react";
 import { supabase } from "../lib/supabase";
+import {
+  useShareStatus,
+  useShareError,
+  useShareAlias,
+  useViewStatus,
+  useViewError,
+  useSetShareStatus,
+  useSetShareError,
+  useSetShareAlias,
+  useSetViewStatus,
+  useSetViewError,
+} from "../store/channelStoreHelpers";
+import { shareSessionRef, viewSessionRef, viewVideoRef, verifyKeyCacheRef } from "../store/webrtcRefs";
+import type { ShareSession, ViewSession } from "../store/webrtcRefs";
 
 type ShareStatus = "idle" | "prompting" | "publishing" | "awaiting" | "connected" | "error";
 type ViewStatus = "idle" | "connecting" | "connected" | "error";
@@ -156,27 +169,24 @@ type ChannelPeerScreenProps = {
 };
 
 export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
-  const [shareStatus, setShareStatus] = useState<ShareStatus>("idle");
-  const [shareError, setShareError] = useState<string | null>(null);
-  const [shareAlias, setShareAlias] = useState<string>("Guest share");
-  const [viewStatus, setViewStatus] = useState<ViewStatus>("idle");
-  const [viewError, setViewError] = useState<string | null>(null);
+  const shareStatus = useShareStatus();
+  const shareError = useShareError();
+  const shareAlias = useShareAlias();
+  const viewStatus = useViewStatus();
+  const viewError = useViewError();
+  const setShareStatus = useSetShareStatus();
+  const setShareError = useSetShareError();
+  const setShareAlias = useSetShareAlias();
+  const setViewStatus = useSetViewStatus();
+  const setViewError = useSetViewError();
 
-  const shareSessionRef = useRef<ShareSession | null>(null);
-  const viewSessionRef = useRef<ViewSession | null>(null);
-  const viewVideoRef = useRef<HTMLVideoElement | null>(null);
-  const verifyKeyCacheRef = useRef<Map<string, CryptoKey>>(new Map());
-
-  const getVerifyKey = useCallback(
-    async (hostKey: string) => {
-      const cached = verifyKeyCacheRef.current.get(hostKey);
-      if (cached) return cached;
-      const imported = await importHostPublicKey(hostKey);
-      verifyKeyCacheRef.current.set(hostKey, imported);
-      return imported;
-    },
-    []
-  );
+  const getVerifyKey = useCallback(async (hostKey: string) => {
+    const cached = verifyKeyCacheRef.get(hostKey);
+    if (cached) return cached;
+    const imported = await importHostPublicKey(hostKey);
+    verifyKeyCacheRef.set(hostKey, imported);
+    return imported;
+  }, []);
 
   const stopShareSession = useCallback(async () => {
     const session = shareSessionRef.current;
@@ -188,7 +198,7 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
     await session.signalChannel.unsubscribe().catch(() => null);
     setShareStatus("idle");
     setShareError(null);
-  }, []);
+  }, [setShareStatus, setShareError]);
 
   const stopViewSession = useCallback(async () => {
     const session = viewSessionRef.current;
@@ -206,7 +216,7 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
     }
     setViewStatus("idle");
     setViewError(null);
-  }, []);
+  }, [setViewStatus, setViewError]);
 
   const handleShareScreen = useCallback(async () => {
     if (shareSessionRef.current) {
@@ -272,8 +282,11 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
       };
 
       pc.onconnectionstatechange = () => {
-        if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+        // Only close on terminal states - "disconnected" can be temporary during ICE negotiation
+        if (pc.connectionState === "failed" || pc.connectionState === "closed") {
           stopShareSession().catch(() => null);
+        } else if (pc.connectionState === "connected") {
+          console.log("Peer share connection established");
         }
       };
 
@@ -284,6 +297,7 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
       if (!pc.localDescription) throw new Error("Missing local description");
 
       setShareStatus("awaiting");
+      console.log("Peer sending offer to host", { peerId, hostKey, channelName: getSignalChannelName(hostKey) });
       await signalChannel.send({
         type: "broadcast",
         event: PEER_OFFER_EVENT,
@@ -295,13 +309,14 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
           timestamp: Date.now(),
         } satisfies PeerOfferMessage,
       });
+      console.log("Peer offer sent", { peerId });
     } catch (err) {
       console.error("Failed to start screen share", err);
       setShareStatus("error");
       setShareError(err instanceof Error ? err.message : "Failed to start screen share");
       await stopShareSession();
     }
-  }, [getVerifyKey, hostKey, shareAlias, stopShareSession]);
+  }, [getVerifyKey, hostKey, shareAlias, stopShareSession, setShareStatus, setShareError]);
 
   const handleViewStream = useCallback(async () => {
     if (viewSessionRef.current) {
@@ -340,8 +355,11 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
       };
 
       pc.onconnectionstatechange = () => {
-        if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+        // Only close on terminal states - "disconnected" can be temporary during ICE negotiation
+        if (pc.connectionState === "failed" || pc.connectionState === "closed") {
           stopViewSession().catch(() => null);
+        } else if (pc.connectionState === "connected") {
+          console.log("Peer view connection established");
         }
       };
 
@@ -391,7 +409,7 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
       setViewError(err instanceof Error ? err.message : "Failed to start viewing stream");
       await stopViewSession();
     }
-  }, [getVerifyKey, hostKey, stopViewSession]);
+  }, [getVerifyKey, hostKey, stopViewSession, setViewStatus, setViewError]);
 
   useEffect(() => {
     return () => {

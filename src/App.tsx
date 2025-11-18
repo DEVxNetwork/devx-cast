@@ -1,36 +1,40 @@
-import { useState } from "react";
 import "./index.css";
 import { ChannelListScreen } from "./screens/ChannelListScreen";
 import { ChannelPeerScreen } from "./screens/ChannelPeerScreen";
 import { ChannelHostScreen } from "./screens/ChannelHostScreen";
-
-type Screen = "channel-list" | "channel" | "host-channel";
+import {
+  useScreen,
+  useSelectedChannelHostKey,
+  useHostChannelId,
+  useNavigateToHostChannel,
+  useNavigateToChannel,
+  useNavigateToChannelList,
+} from "./store/channelStoreHelpers";
 
 export function App() {
-  const [screen, setScreen] = useState<Screen>("channel-list");
-  const [selectedChannelHostKey, setSelectedChannelHostKey] = useState<string | null>(null);
-  const [hostChannelId, setHostChannelId] = useState<string | null>(null);
+  const screen = useScreen();
+  const selectedChannelHostKey = useSelectedChannelHostKey();
+  const hostChannelId = useHostChannelId();
+  const navigateToHostChannel = useNavigateToHostChannel();
+  const navigateToChannel = useNavigateToChannel();
+  const navigateToChannelList = useNavigateToChannelList();
 
   const handleStartChannel = () => {
-    setScreen("host-channel");
-    setHostChannelId(`channel_${Math.random().toString(36).slice(2, 10)}`);
+    navigateToHostChannel(`channel_${Math.random().toString(36).slice(2, 10)}`);
   };
 
   const handleSelectChannel = (hostKey: string) => {
-    setSelectedChannelHostKey(hostKey);
-    setScreen("channel");
+    navigateToChannel(hostKey);
   };
 
   const handleBackToList = () => {
-    setScreen("channel-list");
-    setSelectedChannelHostKey(null);
-    setHostChannelId(null);
+    navigateToChannelList();
   };
 
-  if (screen === "host-channel") {
+  if (screen === "host-channel" && hostChannelId) {
     return (
       <ChannelHostScreen
-        channelId={hostChannelId!}
+        channelId={hostChannelId}
         onBack={handleBackToList}
       />
     );
