@@ -2,11 +2,23 @@ import "./index.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "./lib/supabase";
+import {
+  createOffer,
+  fetchExistingAnswer,
+  fetchPendingOffers,
+  saveAnswer,
+  subscribeToAnswer,
+  subscribeToOffers,
+  updateOfferStatus,
+} from "./lib/signaling";
+import type { OfferRecord } from "./lib/types";
 
 type StreamingPeer = {
   id: string;
   label: string;
   screenTitle: string;
+  stream?: MediaStream | null;
+  offerId?: string;
 };
 
 type Channel = {
@@ -28,6 +40,32 @@ type HostStatusPayload = {
 
 type HostStopPayload = { hostId: string };
 
+type HostSession = {
+  offer: OfferRecord;
+  pc: RTCPeerConnection;
+  stream: MediaStream;
+  peerId: string;
+  channelId: string;
+};
+
+type ShareSession = {
+  offerId: string;
+  pc: RTCPeerConnection;
+  stream: MediaStream;
+  unsubscribeAnswer?: () => Promise<void>;
+};
+
+type ShareStatus = "idle" | "prompting" | "publishing" | "awaiting" | "connected" | "error";
+
+const shareStatusCopy: Record<ShareStatus, string> = {
+  idle: "Not sharing",
+  prompting: "Waiting for screen selection…",
+  publishing: "Publishing offer…",
+  awaiting: "Waiting for host to accept…",
+  connected: "Streaming to host",
+  error: "Share failed",
+};
+
 const HOST_DIRECTORY_CHANNEL = "host-directory";
 const HOST_STATUS_EVENT = "host-status";
 const HOST_STOP_EVENT = "host-stop";
@@ -44,22 +82,23 @@ const upsertChannel = (channels: Channel[], updated: Channel) => {
   return filtered.sort(sortByRecency);
 };
 
-const peerTemplates: Array<Omit<StreamingPeer, "id">> = [
-  { label: "Design review", screenTitle: "Figma handoff workspace" },
-  { label: "Docs walkthrough", screenTitle: "Spec: host-auth-webrtc.md" },
-  { label: "Infra update", screenTitle: "Terminal session • deploy logs" },
-  { label: "Data viz", screenTitle: "Dashboard share • 4k monitor" },
-];
-
-const createStreamingPeerSet = () => {
-  const shuffled = [...peerTemplates].sort(() => Math.random() - 0.5);
-  const slice = shuffled.slice(0, Math.max(1, Math.floor(Math.random() * shuffled.length)));
-  return slice.map((peer) => ({
-    id: `peer_${randomId()}`,
-    label: peer.label,
-    screenTitle: peer.screenTitle,
-  }));
+const waitForIceGathering = async (pc: RTCPeerConnection) => {
+  if (pc.iceGatheringState === "complete") return;
+  await new Promise<void>((resolve) => {
+    const checkState = () => {
+      if (pc.iceGatheringState === "complete") {
+        pc.removeEventListener("icegatheringstatechange", checkState);
+        resolve();
+      }
+    };
+    pc.addEventListener("icegatheringstatechange", checkState);
+  });
 };
+
+const createPeerConnection = () =>
+  new RTCPeerConnection({
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  });
 
 export function App() {
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -67,18 +106,17 @@ export function App() {
   const [hostedChannelId, setHostedChannelId] = useState<string | null>(null);
   const [isCreatingChannel, setIsCreatingChannel] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [shareStatus, setShareStatus] = useState<ShareStatus>("idle");
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [shareAlias, setShareAlias] = useState<string>("Guest share");
 
   const presenceChannelRef = useRef<RealtimeChannel | null>(null);
   const hostedChannelRef = useRef<Channel | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const selectedChannel = useMemo(
-    () => channels.find((channel) => channel.id === selectedChannelId) ?? null,
-    [channels, selectedChannelId]
-  );
-  const activePeer = selectedChannel
-    ? selectedChannel.streamingPeers.find((peer) => peer.id === selectedChannel.activePeerId) ?? null
-    : null;
+  const hostOfferUnsubRef = useRef<(() => Promise<void>) | null>(null);
+  const hostSessionsRef = useRef<Map<string, HostSession>>(new Map());
+  const shareSessionRef = useRef<ShareSession | null>(null);
+  const peerVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
 
   const broadcastLocalHostStatus = useCallback((channelOverride?: Channel) => {
     const presence = presenceChannelRef.current;
@@ -100,6 +138,64 @@ export function App() {
       .catch((err) => console.error("Failed to broadcast host heartbeat", err));
   }, []);
 
+  const mutateChannel = useCallback((channelId: string, updater: (channel: Channel) => Channel) => {
+    setChannels((prev) =>
+      prev.map((channel) => {
+        if (channel.id !== channelId) return channel;
+        const nextChannel = updater(channel);
+        if (hostedChannelRef.current && hostedChannelRef.current.id === nextChannel.id) {
+          hostedChannelRef.current = nextChannel;
+        }
+        return nextChannel;
+      })
+    );
+  }, []);
+
+  const upsertStreamingPeer = useCallback(
+    (channelId: string, peer: StreamingPeer) => {
+      mutateChannel(channelId, (channel) => {
+        const peers = channel.streamingPeers.filter((item) => item.id !== peer.id);
+        peers.push(peer);
+        return { ...channel, streamingPeers: peers };
+      });
+    },
+    [mutateChannel]
+  );
+
+  const updateStreamingPeer = useCallback(
+    (channelId: string, peerId: string, updater: (peer: StreamingPeer) => StreamingPeer) => {
+      mutateChannel(channelId, (channel) => {
+        const peers = channel.streamingPeers.map((peer) => (peer.id === peerId ? updater(peer) : peer));
+        return { ...channel, streamingPeers: peers };
+      });
+    },
+    [mutateChannel]
+  );
+
+  const removeStreamingPeer = useCallback(
+    (channelId: string, peerId: string) => {
+      mutateChannel(channelId, (channel) => {
+        const peers = channel.streamingPeers.filter((peer) => peer.id !== peerId);
+        const nextActive = channel.activePeerId === peerId ? peers[0]?.id ?? null : channel.activePeerId;
+        return { ...channel, streamingPeers: peers, activePeerId: nextActive };
+      });
+      if (hostedChannelRef.current && hostedChannelRef.current.id === channelId) {
+        broadcastLocalHostStatus(hostedChannelRef.current);
+      }
+    },
+    [broadcastLocalHostStatus, mutateChannel]
+  );
+
+  const selectedChannel = useMemo(
+    () => channels.find((channel) => channel.id === selectedChannelId) ?? null,
+    [channels, selectedChannelId]
+  );
+  const activePeer = selectedChannel
+    ? selectedChannel.streamingPeers.find((peer) => peer.id === selectedChannel.activePeerId) ?? null
+    : null;
+  const isShareActive = shareStatus !== "idle" && shareStatus !== "error";
+  const shareButtonDisabled = shareStatus === "prompting" || shareStatus === "publishing";
+
   const sendHostStop = useCallback((hostId: string) => {
     const presence = presenceChannelRef.current;
     if (!presence) return;
@@ -119,6 +215,28 @@ export function App() {
     }
   }, []);
 
+  const closeHostSession = useCallback(
+    (offerId: string) => {
+      const session = hostSessionsRef.current.get(offerId);
+      if (!session) return;
+      session.stream.getTracks().forEach((track) => track.stop());
+      session.pc.ontrack = null;
+      session.pc.onconnectionstatechange = null;
+      session.pc.close();
+      hostSessionsRef.current.delete(offerId);
+      removeStreamingPeer(session.channelId, session.peerId);
+    },
+    [removeStreamingPeer]
+  );
+
+  const teardownHostSessions = useCallback(() => {
+    Array.from(hostSessionsRef.current.keys()).forEach((offerId) => closeHostSession(offerId));
+    if (hostOfferUnsubRef.current) {
+      hostOfferUnsubRef.current().catch(() => null);
+      hostOfferUnsubRef.current = null;
+    }
+  }, [closeHostSession]);
+
   const stopHosting = useCallback(() => {
     const current = hostedChannelRef.current;
     if (!current) return;
@@ -126,8 +244,100 @@ export function App() {
     hostedChannelRef.current = null;
     setHostedChannelId(null);
     stopHeartbeat();
+    teardownHostSessions();
     setChannels((prev) => prev.filter((channel) => channel.id !== current.id));
-  }, [sendHostStop, stopHeartbeat]);
+  }, [sendHostStop, stopHeartbeat, teardownHostSessions]);
+
+  const attachStreamToPeer = useCallback(
+    (channelId: string, peerId: string, stream: MediaStream, label: string, offerId: string) => {
+      mutateChannel(channelId, (channel) => {
+        const peers = channel.streamingPeers.filter((item) => item.id !== peerId);
+        peers.push({
+          id: peerId,
+          label,
+          screenTitle: "Live screen share",
+          stream,
+          offerId,
+        });
+        return {
+          ...channel,
+          streamingPeers: peers,
+          activePeerId: channel.activePeerId ?? peerId,
+        };
+      });
+      if (hostedChannelRef.current && hostedChannelRef.current.id === channelId) {
+        broadcastLocalHostStatus(hostedChannelRef.current);
+      }
+    },
+    [broadcastLocalHostStatus, mutateChannel]
+  );
+
+  const autoAcceptOffer = useCallback(
+    async (channel: Channel, offer: OfferRecord) => {
+      if (hostSessionsRef.current.has(offer.id)) return;
+      try {
+        const pc = createPeerConnection();
+        const stream = new MediaStream();
+        const peerId = `peer_${randomId()}`;
+        hostSessionsRef.current.set(offer.id, { offer, pc, stream, peerId, channelId: channel.id });
+
+        pc.ontrack = (event) => {
+          if (event.streams && event.streams[0]) {
+            attachStreamToPeer(channel.id, peerId, event.streams[0], offer.caster_name ?? "Guest share", offer.id);
+          } else {
+            stream.addTrack(event.track);
+            attachStreamToPeer(channel.id, peerId, stream, offer.caster_name ?? "Guest share", offer.id);
+          }
+        };
+
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === "failed" || pc.connectionState === "disconnected" || pc.connectionState === "closed") {
+            closeHostSession(offer.id);
+          }
+        };
+
+        await pc.setRemoteDescription(offer.offer);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await waitForIceGathering(pc);
+        if (!pc.localDescription) throw new Error("Missing local description");
+        await saveAnswer(offer.id, pc.localDescription);
+        await updateOfferStatus(offer.id, "accepted");
+      } catch (err) {
+        console.error("Failed to accept offer", err);
+        closeHostSession(offer.id);
+        await updateOfferStatus(offer.id, "denied").catch(() => null);
+      }
+    },
+    [attachStreamToPeer, closeHostSession]
+  );
+
+  const startHostOfferListener = useCallback(
+    async (channel: Channel) => {
+      const hostKey = channel.hostKey.toUpperCase();
+
+      const handleOfferRecord = (record: OfferRecord) => {
+        if ((record.room_code ?? "").toUpperCase() !== hostKey) return;
+        if (record.status === "pending") {
+          autoAcceptOffer(channel, record);
+        } else if (record.status === "completed" || record.status === "denied") {
+          closeHostSession(record.id);
+        }
+      };
+
+      try {
+        const pending = await fetchPendingOffers();
+        pending.forEach(handleOfferRecord);
+      } catch (err) {
+        console.error("Failed to fetch pending offers", err);
+      }
+
+      hostOfferUnsubRef.current = subscribeToOffers((record) => {
+        handleOfferRecord(record);
+      });
+    },
+    [autoAcceptOffer, closeHostSession]
+  );
 
   const handleHostStatus = useCallback((payload: HostStatusPayload) => {
     setChannels((prev) => {
@@ -228,6 +438,17 @@ export function App() {
     };
   }, [stopHosting]);
 
+  useEffect(() => {
+    channels.forEach((channel) => {
+      channel.streamingPeers.forEach((peer) => {
+        const video = peerVideoRefs.current.get(peer.id);
+        if (video && peer.stream && video.srcObject !== peer.stream) {
+          video.srcObject = peer.stream;
+        }
+      });
+    });
+  }, [channels]);
+
   const handleAddChannel = useCallback(() => {
     if (isCreatingChannel) return;
     setIsCreatingChannel(true);
@@ -237,14 +458,13 @@ export function App() {
         stopHosting();
       }
 
-      const streamingPeers = createStreamingPeerSet();
       const nextChannel: Channel = {
         id: `channel_${randomId()}`,
         hostKey: createHostKey(),
         broadcastPeers: Math.floor(Math.random() * 240) + 16,
         lastActive: Date.now(),
-        streamingPeers,
-        activePeerId: streamingPeers[0]?.id ?? null,
+        streamingPeers: [],
+        activePeerId: null,
       };
 
       hostedChannelRef.current = nextChannel;
@@ -254,13 +474,105 @@ export function App() {
 
       broadcastLocalHostStatus(nextChannel);
       startHeartbeat();
+      startHostOfferListener(nextChannel);
     } catch (err) {
       console.error("Failed to create channel", err);
       setError(err instanceof Error ? err.message : "Failed to create channel");
     } finally {
       setIsCreatingChannel(false);
     }
-  }, [broadcastLocalHostStatus, isCreatingChannel, startHeartbeat, stopHosting]);
+  }, [broadcastLocalHostStatus, isCreatingChannel, startHeartbeat, startHostOfferListener, stopHosting]);
+
+  const stopShareSession = useCallback(async () => {
+    const session = shareSessionRef.current;
+    if (!session) return;
+    shareSessionRef.current = null;
+    session.stream.getTracks().forEach((track) => track.stop());
+    session.pc.onconnectionstatechange = null;
+    session.pc.close();
+    if (session.unsubscribeAnswer) {
+      await session.unsubscribeAnswer().catch(() => null);
+    }
+    await updateOfferStatus(session.offerId, "completed").catch(() => null);
+    setShareStatus("idle");
+    setShareError(null);
+  }, []);
+
+  const handleShareScreen = useCallback(async () => {
+    if (shareSessionRef.current) {
+      await stopShareSession();
+      return;
+    }
+    if (!selectedChannel) {
+      setShareError("Select a channel to share your screen.");
+      return;
+    }
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      setShareError("Screen sharing is not supported in this browser.");
+      return;
+    }
+    setShareError(null);
+    setShareStatus("prompting");
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      if (!stream.getVideoTracks().length) {
+        throw new Error("No video track captured");
+      }
+      const pc = createPeerConnection();
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitForIceGathering(pc);
+      if (!pc.localDescription) throw new Error("Missing local description");
+
+      setShareStatus("publishing");
+      const record = await createOffer({
+        offer: pc.localDescription,
+        casterName: shareAlias.trim() || "Guest share",
+        roomCode: selectedChannel.hostKey,
+      });
+      setShareStatus("awaiting");
+
+      const applyAnswer = async (answer: RTCSessionDescriptionInit) => {
+        const description =
+          typeof RTCSessionDescription !== "undefined" ? new RTCSessionDescription(answer) : answer;
+        await pc.setRemoteDescription(description);
+        setShareStatus("connected");
+      };
+
+      const unsubscribe = subscribeToAnswer(record.id, async (payload) => {
+        await applyAnswer(payload.answer);
+      });
+      const existingAnswer = await fetchExistingAnswer(record.id);
+      if (existingAnswer) {
+        await applyAnswer(existingAnswer.answer);
+      }
+
+      shareSessionRef.current = {
+        offerId: record.id,
+        pc,
+        stream,
+        unsubscribeAnswer: unsubscribe,
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "failed" || pc.connectionState === "disconnected" || pc.connectionState === "closed") {
+          stopShareSession().catch(() => null);
+        }
+      };
+    } catch (err) {
+      console.error("Failed to start screen share", err);
+      setShareStatus("error");
+      setShareError(err instanceof Error ? err.message : "Failed to start screen share");
+      await stopShareSession();
+    }
+  }, [selectedChannel, shareAlias, stopShareSession]);
+
+  useEffect(() => {
+    return () => {
+      stopShareSession();
+    };
+  }, [stopShareSession]);
 
   const handleHighlightPeer = (peerId: string) => {
     if (!selectedChannel) return;
@@ -353,8 +665,14 @@ export function App() {
                   Start a WebRTC session to push your screen into the host console. Your request is signed against the
                   host key so the host can trust it.
                 </p>
-                <button className="secondary-button" type="button">
-                  Share screen
+                <label className="field">
+                  <span>Display name</span>
+                  <input value={shareAlias} onChange={(event) => setShareAlias(event.target.value)} placeholder="Guest share" />
+                </label>
+                {shareError && <p className="error-text">{shareError}</p>}
+                <p className="muted">Status: {shareStatusCopy[shareStatus]}</p>
+                <button className="secondary-button" type="button" onClick={handleShareScreen} disabled={shareButtonDisabled}>
+                  {isShareActive ? "Stop sharing" : "Share screen"}
                 </button>
               </article>
               <article>
@@ -387,7 +705,25 @@ export function App() {
                     return (
                       <article key={peer.id} className={`peer-card ${isActive ? "active" : ""}`}>
                         <div className="peer-video">
-                          <span>{peer.label}</span>
+                          {peer.stream ? (
+                            <video
+                              ref={(el) => {
+                                if (!el) {
+                                  peerVideoRefs.current.delete(peer.id);
+                                  return;
+                                }
+                                peerVideoRefs.current.set(peer.id, el);
+                                if (peer.stream && el.srcObject !== peer.stream) {
+                                  el.srcObject = peer.stream;
+                                }
+                              }}
+                              autoPlay
+                              playsInline
+                              muted
+                            />
+                          ) : (
+                            <span>{peer.label}</span>
+                          )}
                         </div>
                         <div className="peer-details">
                           <strong>{peer.label}</strong>
