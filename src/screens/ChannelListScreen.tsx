@@ -1,24 +1,6 @@
 import { useEffect } from "react";
-import { supabase } from "../lib/supabase";
 import { useChannels } from "../store/channelStoreHelpers";
-import { useChannelStore } from "../store/channelStore";
-import { presenceChannelRef } from "../store/webrtcRefs";
-import type { Channel } from "../store/channelStore";
-
-type HostStatusPayload = {
-  hostId: string;
-  hostKey: string;
-  broadcastPeers: number;
-  timestamp: number;
-};
-
-type HostStopPayload = { hostId: string };
-
-const HOST_DIRECTORY_CHANNEL = "host-directory";
-const HOST_STATUS_EVENT = "host-status";
-const HOST_STOP_EVENT = "host-stop";
-const HOST_TIMEOUT_MS = 60_000;
-const STALE_SWEEP_INTERVAL_MS = 5_000;
+import { initChannelListSubscriptions } from "../lib/channelSubscriptions";
 
 type ChannelListScreenProps = {
   onStartChannel: () => void;
@@ -28,52 +10,10 @@ type ChannelListScreenProps = {
 export function ChannelListScreen({ onStartChannel, onSelectChannel }: ChannelListScreenProps) {
   const channels = useChannels();
 
+  // Initialize subscriptions on mount, cleanup on unmount
   useEffect(() => {
-    const channel = supabase.channel(HOST_DIRECTORY_CHANNEL, {
-      config: { broadcast: { self: true } },
-    });
-    presenceChannelRef.current = channel;
-
-    channel
-      .on("broadcast", { event: HOST_STATUS_EVENT }, ({ payload }) => {
-        const p = payload as HostStatusPayload;
-        // Access actions directly from store to avoid dependency issues
-        const { addChannel } = useChannelStore.getState();
-        addChannel({
-          id: p.hostId,
-          hostKey: p.hostKey,
-          broadcastPeers: p.broadcastPeers ?? 0,
-          lastActive: p.timestamp,
-        });
-      })
-      .on("broadcast", { event: HOST_STOP_EVENT }, ({ payload }) => {
-        const p = payload as HostStopPayload;
-        // Access actions directly from store to avoid dependency issues
-        const { removeChannel } = useChannelStore.getState();
-        removeChannel(p.hostId);
-      })
-      .subscribe();
-
-    return () => {
-      channel.unsubscribe();
-      presenceChannelRef.current = null;
-    };
-  }, []); // Empty deps - access store directly
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const cutoff = Date.now() - HOST_TIMEOUT_MS;
-      // Access channels and actions directly from store to avoid dependency loop
-      const currentChannels = useChannelStore.getState().channels;
-      const { removeChannel } = useChannelStore.getState();
-      currentChannels.forEach((ch) => {
-        if (ch.lastActive < cutoff) {
-          removeChannel(ch.id);
-        }
-      });
-    }, STALE_SWEEP_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, []); // Empty deps - access store directly
+    return initChannelListSubscriptions();
+  }, []);
 
   return (
     <div className="app">

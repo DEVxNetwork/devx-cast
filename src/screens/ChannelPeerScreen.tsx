@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useEffect } from "react";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
 import {
   useShareStatus,
@@ -13,7 +14,6 @@ import {
   useSetViewError,
 } from "../store/channelStoreHelpers";
 import { shareSessionRef, viewSessionRef, viewVideoRef, verifyKeyCacheRef } from "../store/webrtcRefs";
-import type { ShareSession, ViewSession } from "../store/webrtcRefs";
 
 type ShareStatus = "idle" | "prompting" | "publishing" | "awaiting" | "connected" | "error";
 type ViewStatus = "idle" | "connecting" | "connected" | "error";
@@ -56,22 +56,6 @@ type HostAnswerMessage = {
   timestamp: number;
 };
 
-type ShareSession = {
-  peerId: string;
-  nonce: string;
-  hostKey: string;
-  pc: RTCPeerConnection;
-  stream: MediaStream;
-  signalChannel: RealtimeChannel;
-};
-
-type ViewSession = {
-  peerId: string;
-  pc: RTCPeerConnection;
-  stream: MediaStream | null;
-  signalChannel: RealtimeChannel;
-};
-
 const textEncoder = new TextEncoder();
 
 const arrayBufferToBase64Url = (buffer: ArrayBuffer) => {
@@ -107,7 +91,7 @@ const VIEW_ANSWER_EVENT = "view-answer";
 
 const subscribeToRealtimeChannel = (channel: RealtimeChannel) =>
   new Promise<void>((resolve, reject) => {
-    channel.subscribe((status) => {
+    channel.subscribe((status: string) => {
       if (status === "SUBSCRIBED") {
         resolve();
       } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
@@ -180,15 +164,15 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
   const setViewStatus = useSetViewStatus();
   const setViewError = useSetViewError();
 
-  const getVerifyKey = useCallback(async (hostKey: string) => {
+  const getVerifyKey = async (hostKey: string) => {
     const cached = verifyKeyCacheRef.get(hostKey);
     if (cached) return cached;
     const imported = await importHostPublicKey(hostKey);
     verifyKeyCacheRef.set(hostKey, imported);
     return imported;
-  }, []);
+  };
 
-  const stopShareSession = useCallback(async () => {
+  const stopShareSession = async () => {
     const session = shareSessionRef.current;
     if (!session) return;
     shareSessionRef.current = null;
@@ -198,9 +182,9 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
     await session.signalChannel.unsubscribe().catch(() => null);
     setShareStatus("idle");
     setShareError(null);
-  }, [setShareStatus, setShareError]);
+  };
 
-  const stopViewSession = useCallback(async () => {
+  const stopViewSession = async () => {
     const session = viewSessionRef.current;
     if (!session) return;
     viewSessionRef.current = null;
@@ -216,9 +200,9 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
     }
     setViewStatus("idle");
     setViewError(null);
-  }, [setViewStatus, setViewError]);
+  };
 
-  const handleShareScreen = useCallback(async () => {
+  const handleShareScreen = async () => {
     if (shareSessionRef.current) {
       await stopShareSession();
       return;
@@ -316,9 +300,9 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
       setShareError(err instanceof Error ? err.message : "Failed to start screen share");
       await stopShareSession();
     }
-  }, [getVerifyKey, hostKey, shareAlias, stopShareSession, setShareStatus, setShareError]);
+  };
 
-  const handleViewStream = useCallback(async () => {
+  const handleViewStream = async () => {
     if (viewSessionRef.current) {
       await stopViewSession();
       return;
@@ -409,14 +393,22 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
       setViewError(err instanceof Error ? err.message : "Failed to start viewing stream");
       await stopViewSession();
     }
-  }, [getVerifyKey, hostKey, stopViewSession, setViewStatus, setViewError]);
+  };
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopShareSession();
       stopViewSession();
     };
-  }, [stopShareSession, stopViewSession]);
+  }, []);
+
+  // Update video element when view stream changes (DOM updates only)
+  useEffect(() => {
+    if (viewVideoRef.current && viewSessionRef.current?.stream) {
+      viewVideoRef.current.srcObject = viewSessionRef.current.stream;
+    }
+  }, [viewStatus]);
 
   const isShareActive = shareStatus !== "idle" && shareStatus !== "error";
   const shareButtonDisabled = shareStatus === "prompting" || shareStatus === "publishing";
@@ -483,12 +475,7 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
                 </button>
                 {isViewActive && (
                   <div className="video-player" style={{ marginTop: "1rem" }}>
-                    <video
-                      ref={viewVideoRef}
-                      autoPlay
-                      playsInline
-                      muted
-                    />
+                    <video ref={viewVideoRef} autoPlay playsInline muted />
                   </div>
                 )}
               </div>
@@ -499,4 +486,3 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
     </div>
   );
 }
-
