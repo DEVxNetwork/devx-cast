@@ -43,7 +43,7 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
 
   return (
     <div className="app">
-      <div className="page">
+      <div className="page page-full-width">
         <div className="card">
           <ScreenHeader
             label="Channel host key"
@@ -52,23 +52,21 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
             onBack={onBack}
           />
 
-          <section className="section">
-            <div className="options-grid">
-              <ShareScreenCard
-                shareStatus={shareStatus}
-                shareError={shareError}
-                shareAlias={shareAlias}
-                onAliasChange={setShareAlias}
-                onShareClick={() => handleShareScreen(hostKey)}
-              />
-              <ViewStreamCard
-                viewStatus={viewStatus}
-                viewError={viewError}
-                stream={viewStream}
-                onViewClick={() => handleViewStream(hostKey)}
-              />
-            </div>
-          </section>
+          <div className="options-grid">
+            <ShareScreenCard
+              shareStatus={shareStatus}
+              shareError={shareError}
+              shareAlias={shareAlias}
+              onAliasChange={setShareAlias}
+              onShareClick={() => handleShareScreen(hostKey)}
+            />
+            <ViewStreamCard
+              viewStatus={viewStatus}
+              viewError={viewError}
+              stream={viewStream}
+              onViewClick={() => handleViewStream(hostKey)}
+            />
+          </div>
         </div>
       </div>
     </div>
