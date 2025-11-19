@@ -3,7 +3,6 @@ import { supabase } from "../lib/supabase";
 import {
   useStreamingPeers,
   useActivePeerId,
-  useBroadcastPeers,
   useActivePeer,
   useInitializeHost,
   useStopHeartbeat,
@@ -15,7 +14,6 @@ import { hostKeyPairRef, presenceChannelRef, peerVideoRefs, hostSignalChannelRef
 import { HOST_DIRECTORY_CHANNEL } from "../lib/webrtcUtils";
 import { ScreenHeader } from "../components/ScreenHeader";
 import { BroadcastPlayer } from "../components/BroadcastPlayer";
-import { StatsDisplay } from "../components/StatsDisplay";
 import { StreamingPeersSection } from "../components/StreamingPeersSection";
 import { PeerCard } from "../components/PeerCard";
 import { EmptyState } from "../components/EmptyState";
@@ -28,7 +26,6 @@ type ChannelHostScreenProps = {
 export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps) {
   const streamingPeers = useStreamingPeers();
   const activePeerId = useActivePeerId();
-  const broadcastPeers = useBroadcastPeers();
   const activePeer = useActivePeer();
   const initializeHost = useInitializeHost();
   const stopHeartbeat = useStopHeartbeat();
@@ -112,7 +109,7 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
 
   return (
     <div className="app">
-      <div className="page">
+      <div className="page page-full-width">
         <div className="card">
           <ScreenHeader
             label="Host channel"
@@ -121,14 +118,11 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
             onBack={onBack}
           />
 
-          <section className="section">
-            <BroadcastPlayer
-              stream={activePeer?.stream ?? null}
-              peerLabel={activePeer?.label ?? null}
-              peerScreenTitle={activePeer?.screenTitle ?? null}
-            />
-            <StatsDisplay broadcastPeers={broadcastPeers} activePeerLabel={activePeer?.label ?? null} />
-          </section>
+          <BroadcastPlayer
+            stream={activePeer?.stream ?? null}
+            peerLabel={activePeer?.label ?? null}
+            peerScreenTitle={activePeer?.screenTitle ?? null}
+          />
 
           <StreamingPeersSection peerCount={streamingPeers.length}>
             {streamingPeers.length === 0 ? (
