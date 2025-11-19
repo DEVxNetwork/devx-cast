@@ -88,18 +88,23 @@ export function ChannelHostScreen({ channelId, onBack }: ChannelHostScreenProps)
 
   // Update viewer streams when active peer changes
   useEffect(() => {
-    if (activePeer?.stream) {
+    if (activePeer) {
       const stream = activePeer.stream;
+      const videoTrack = stream?.getVideoTracks()[0] || null;
+      const audioTrack = stream?.getAudioTracks()[0] || null;
+
       viewSessionsRef.forEach((pc: RTCPeerConnection) => {
-        // Remove old tracks
-        pc.getSenders().forEach((sender: RTCRtpSender) => {
-          if (sender.track) {
-            pc.removeTrack(sender);
+        pc.getTransceivers().forEach((t) => {
+          if (t.receiver.track.kind === "video") {
+            t.sender
+              .replaceTrack(videoTrack)
+              .catch((e) => console.error("Error replacing video track", e));
           }
-        });
-        // Add new tracks from active peer
-        stream.getTracks().forEach((track) => {
-          pc.addTrack(track, stream);
+          if (t.receiver.track.kind === "audio") {
+            t.sender
+              .replaceTrack(audioTrack)
+              .catch((e) => console.error("Error replacing audio track", e));
+          }
         });
       });
     }
