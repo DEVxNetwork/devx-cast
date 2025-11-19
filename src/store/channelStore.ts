@@ -99,6 +99,7 @@ interface ChannelStore {
   viewStatus: ViewStatus;
   viewError: string | null;
   viewStream: MediaStream | null;
+  localShareStream: MediaStream | null;
 
   // Peer actions
   setShareStatus: (status: ShareStatus) => void;
@@ -107,6 +108,7 @@ interface ChannelStore {
   setViewStatus: (status: ViewStatus) => void;
   setViewError: (error: string | null) => void;
   setViewStream: (stream: MediaStream | null) => void;
+  setLocalShareStream: (stream: MediaStream | null) => void;
   clearPeerState: () => void;
 
   // Peer handlers
@@ -225,6 +227,7 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
   viewStatus: "idle",
   viewError: null,
   viewStream: null,
+  localShareStream: null,
 
   // Peer actions
   setShareStatus: (status) => set({ shareStatus: status }),
@@ -233,6 +236,7 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
   setViewStatus: (status) => set({ viewStatus: status }),
   setViewError: (error) => set({ viewError: error }),
   setViewStream: (stream) => set({ viewStream: stream }),
+  setLocalShareStream: (stream) => set({ localShareStream: stream }),
   clearPeerState: () =>
     set({
       shareStatus: "idle",
@@ -241,6 +245,7 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
       viewStatus: "idle",
       viewError: null,
       viewStream: null,
+      localShareStream: null,
     }),
 
   // Peer handlers
@@ -273,6 +278,7 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
     console.log("[DEBUG] Setting share status to idle");
     get().setShareStatus("idle");
     get().setShareError(null);
+    get().setLocalShareStream(null);
   },
 
   stopViewSession: async () => {
@@ -319,6 +325,7 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
     try {
       console.log("[DEBUG] Requesting screen share...");
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      get().setLocalShareStream(stream);
       console.log("[DEBUG] Screen share stream obtained", { 
         trackCount: stream.getVideoTracks().length,
         trackStates: stream.getVideoTracks().map(t => ({ id: t.id, enabled: t.enabled, readyState: t.readyState }))

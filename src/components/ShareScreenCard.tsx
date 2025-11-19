@@ -30,7 +30,6 @@ export function ShareScreenCard({
   onShareClick,
 }: ShareScreenCardProps) {
   const isShareActive = shareStatus !== "idle" && shareStatus !== "error";
-  const shareButtonDisabled = shareStatus === "prompting" || shareStatus === "publishing";
 
   return (
     <OptionCard
@@ -49,7 +48,6 @@ export function ShareScreenCard({
         className="btn btn-secondary"
         type="button"
         onClick={onShareClick}
-        disabled={shareButtonDisabled}
       >
         {isShareActive ? "Stop sharing" : "Share screen"}
       </button>

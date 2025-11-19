@@ -9,9 +9,11 @@ import {
   useSetShareAlias,
   useHandleShareScreen,
   useHandleViewStream,
+  useLocalShareStream,
 } from "../store/channelStoreHelpers";
 import { useChannelStore } from "../store/channelStore";
 import { ScreenHeader } from "../components/ScreenHeader";
+import { BroadcastPlayer } from "../components/BroadcastPlayer";
 import { ShareScreenCard } from "../components/ShareScreenCard";
 import { ViewStreamCard } from "../components/ViewStreamCard";
 
@@ -27,6 +29,7 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
   const viewStatus = useViewStatus();
   const viewError = useViewError();
   const viewStream = useViewStream();
+  const localShareStream = useLocalShareStream();
   const setShareAlias = useSetShareAlias();
   const handleShareScreen = useHandleShareScreen();
   const handleViewStream = useHandleViewStream();
@@ -41,6 +44,10 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
     };
   }, []); // Empty deps - only run on unmount
 
+  const activeStream = viewStream || localShareStream;
+  const activeLabel = viewStream ? "Host Stream" : localShareStream ? "You" : null;
+  const activeTitle = viewStream ? "Live Stream" : localShareStream ? "Screen Share" : null;
+
   return (
     <div className="app">
       <div className="page page-full-width">
@@ -50,6 +57,12 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
             value={hostKey}
             backButtonLabel="Back to channels"
             onBack={onBack}
+          />
+
+          <BroadcastPlayer
+            stream={activeStream}
+            peerLabel={activeLabel}
+            peerScreenTitle={activeTitle}
           />
 
           <div className="options-grid">
@@ -63,7 +76,7 @@ export function ChannelPeerScreen({ hostKey, onBack }: ChannelPeerScreenProps) {
             <ViewStreamCard
               viewStatus={viewStatus}
               viewError={viewError}
-              stream={viewStream}
+              stream={null}
               onViewClick={() => handleViewStream(hostKey)}
             />
           </div>

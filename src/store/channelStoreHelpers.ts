@@ -1,5 +1,4 @@
 import { useChannelStore } from "./channelStore";
-import type { RealtimeChannel } from "@supabase/supabase-js";
 
 /**
  * Helper hooks for accessing specific parts of the store
@@ -57,6 +56,7 @@ export const useSetViewError = () => useChannelStore((state) => state.setViewErr
 export const useSetViewStream = () => useChannelStore((state) => state.setViewStream);
 export const useClearPeerState = () => useChannelStore((state) => state.clearPeerState);
 export const useViewStream = () => useChannelStore((state) => state.viewStream);
+export const useLocalShareStream = () => useChannelStore((state) => state.localShareStream);
 
 // Peer handlers
 export const useHandleShareScreen = () => useChannelStore((state) => state.handleShareScreen);
