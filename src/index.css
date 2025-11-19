@@ -93,7 +93,6 @@ button {
 }
 
 .section {
-  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 0.5rem;
   padding: 1.5rem;
   background: rgba(255, 255, 255, 0.02);
@@ -223,7 +222,6 @@ button {
 }
 
 .option-card {
-  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 0.5rem;
   padding: 1.5rem;
   background: rgba(255, 255, 255, 0.02);
@@ -281,7 +279,6 @@ button {
 /* Broadcast Video */
 .broadcast-player {
   border-radius: 0.5rem;
-  border: 1px solid rgba(255, 255, 255, 0.1);
   background: #000000;
   min-height: 400px;
   display: flex;
@@ -340,7 +337,6 @@ button {
 .stat {
   padding: 1.25rem;
   border-radius: 0.5rem;
-  border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(255, 255, 255, 0.02);
 }
 
@@ -409,7 +405,6 @@ button {
   display: flex;
   justify-content: center;
   align-items: center;
-  border: 1px solid rgba(255, 255, 255, 0.1);
   overflow: hidden;
 }
 
@@ -444,7 +439,6 @@ button {
   border-radius: 0.5rem;
   background: #000000;
   aspect-ratio: 16 / 9;
-  border: 1px solid rgba(255, 255, 255, 0.1);
   overflow: hidden;
 }
 
