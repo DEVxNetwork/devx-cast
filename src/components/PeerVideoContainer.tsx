@@ -27,7 +27,7 @@ export function PeerVideoContainer({ peerId, stream, label, onVideoRef }: PeerVi
   return (
     <div className="peer-video-container">
       {stream ? (
-        <video ref={videoRef} autoPlay playsInline muted />
+        <video ref={videoRef} autoPlay playsInline muted controls />
       ) : (
         <span>{label}</span>
       )}

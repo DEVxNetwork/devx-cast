@@ -20,7 +20,7 @@ export function VideoPlayer({ stream, autoPlay = true, playsInline = true, muted
 
   return (
     <div className="video-player" style={{ marginTop: "1rem" }}>
-      <video ref={videoRef} autoPlay={autoPlay} playsInline={playsInline} muted={muted} />
+      <video ref={videoRef} autoPlay={autoPlay} playsInline={playsInline} muted={muted} controls />
     </div>
   );
 }
