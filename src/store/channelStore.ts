@@ -22,7 +22,9 @@ import {
   subscribeToRealtimeChannel,
   randomId,
   waitForIceGathering,
-  createPeerConnection
+  createPeerConnection,
+  optimizeSdpForLowLatency, getScreenShareConstraints,
+  optimizePeerConnection
 } from "../lib/webrtcUtils";
 import {
   generateHostKeyPair,
@@ -324,7 +326,8 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
 
     try {
       console.log("[DEBUG] Requesting screen share...");
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      const constraints = getScreenShareConstraints();
+      const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
       get().setLocalShareStream(stream);
       console.log("[DEBUG] Screen share stream obtained", { 
         trackCount: stream.getVideoTracks().length,
@@ -341,6 +344,9 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
         console.log("[DEBUG] Adding track to peer connection", { trackId: track.id });
         pc.addTrack(track, stream);
       });
+      
+      // Optimize peer connection after tracks are added
+      await optimizePeerConnection(pc);
 
       const channelName = getSignalChannelName(hostKey);
       console.log("[DEBUG] Creating signal channel", { channelName });
@@ -444,6 +450,12 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
       get().setShareStatus("publishing");
       const offer = await pc.createOffer();
       console.log("[DEBUG] Offer created", { type: offer.type, sdp: offer.sdp?.substring(0, 100) });
+      
+      // Optimize SDP for low latency
+      if (offer.sdp) {
+        offer.sdp = optimizeSdpForLowLatency(offer.sdp);
+      }
+      
       await pc.setLocalDescription(offer);
       console.log("[DEBUG] Local description set, waiting for ICE gathering");
       await waitForIceGathering(pc);
@@ -556,6 +568,10 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
             : message.answer;
         await pc.setRemoteDescription(description);
         console.log("[DEBUG] View remote description set - connection should be established");
+        
+        // Optimize viewer connection for high quality and low latency
+        // Note: Viewers are receive-only, but we can still optimize transceivers
+        await optimizePeerConnection(pc);
       });
 
       await subscribeToRealtimeChannel(signalChannel);
@@ -564,10 +580,37 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
       // The viewer only receives tracks from the host, doesn't send any
       // Add transceivers configured for receive-only to ensure the offer includes media sections
       console.log("[DEBUG] Creating view offer (receive-only, no local tracks)");
-      pc.addTransceiver("video", { direction: "recvonly" });
-      pc.addTransceiver("audio", { direction: "recvonly" });
+      const videoTransceiver = pc.addTransceiver("video", { direction: "recvonly" });
+      const audioTransceiver = pc.addTransceiver("audio", { direction: "recvonly" });
+      
+      // Set codec preferences for high quality (VP9/VP8 preferred over H.264)
+      // Must be done BEFORE createOffer() to affect the SDP
+      try {
+        const videoCodecs = RTCRtpReceiver.getCapabilities("video")?.codecs;
+        if (videoCodecs && videoCodecs.length > 0) {
+          // Prefer VP9, then VP8, then H.264
+          const preferredVideoCodecs = [
+            ...videoCodecs.filter((c) => c.mimeType.toLowerCase().includes("vp9")),
+            ...videoCodecs.filter((c) => c.mimeType.toLowerCase().includes("vp8")),
+            ...videoCodecs.filter((c) => c.mimeType.toLowerCase().includes("h264")),
+          ];
+          // Only set preferences if we have codecs and the method exists
+          if (preferredVideoCodecs.length > 0 && typeof videoTransceiver.setCodecPreferences === "function") {
+            videoTransceiver.setCodecPreferences(preferredVideoCodecs);
+          }
+        }
+      } catch (error) {
+        // Non-fatal: codec preferences are optional, continue without them
+        console.warn("Failed to set video codec preferences (non-fatal):", error);
+      }
       
       const offer = await pc.createOffer();
+      
+      // Optimize SDP for low latency
+      if (offer.sdp) {
+        offer.sdp = optimizeSdpForLowLatency(offer.sdp);
+      }
+      
       await pc.setLocalDescription(offer);
       await waitForIceGathering(pc);
       if (!pc.localDescription) throw new Error("Missing local description");
@@ -747,6 +790,12 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
 
       console.log("Host creating answer", { peerId });
       const answer = await pc.createAnswer();
+      
+      // Optimize SDP for low latency
+      if (answer.sdp) {
+        answer.sdp = optimizeSdpForLowLatency(answer.sdp);
+      }
+      
       await pc.setLocalDescription(answer);
       console.log("Host created answer", { peerId });
 
@@ -756,6 +805,9 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
         throw new Error("Missing local description after ICE gathering");
       }
       console.log("Host ICE gathering complete", { peerId });
+      
+      // Optimize video tracks after connection is established
+      await optimizePeerConnection(pc);
 
       // Normalize RTCSessionDescription to plain object for consistent signing
       const answerObj = {
@@ -851,9 +903,44 @@ export const useChannelStore = create<ChannelStore>((set, get) => ({
       await pc.setRemoteDescription(payload.offer);
       console.log("[DEBUG HOST] Set remote description for view offer", { viewerId });
       
+      // Set codec preferences BEFORE creating answer (must be done before SDP generation)
+      try {
+        const transceivers = pc.getTransceivers();
+        const videoCodecs = RTCRtpSender.getCapabilities("video")?.codecs;
+        if (videoCodecs && videoCodecs.length > 0) {
+          // Prefer VP9, then VP8, then H.264 for better quality and lower latency
+          const preferredVideoCodecs = [
+            ...videoCodecs.filter((c) => c.mimeType.toLowerCase().includes("vp9")),
+            ...videoCodecs.filter((c) => c.mimeType.toLowerCase().includes("vp8")),
+            ...videoCodecs.filter((c) => c.mimeType.toLowerCase().includes("h264")),
+          ];
+          
+          for (const transceiver of transceivers) {
+            if (transceiver.sender.track?.kind === "video" && preferredVideoCodecs.length > 0) {
+              if (typeof transceiver.setCodecPreferences === "function") {
+                transceiver.setCodecPreferences(preferredVideoCodecs);
+              }
+            }
+          }
+        }
+      } catch (error) {
+        // Non-fatal: codec preferences are optional, continue without them
+        console.warn("Failed to set codec preferences for viewer (non-fatal):", error);
+      }
+      
       const answer = await pc.createAnswer();
+      
+      // Optimize SDP for low latency
+      if (answer.sdp) {
+        answer.sdp = optimizeSdpForLowLatency(answer.sdp);
+      }
+      
       await pc.setLocalDescription(answer);
       await waitForIceGathering(pc);
+      
+      // Optimize video senders for high quality streaming to viewers
+      // This ensures viewers receive high bitrate, high quality streams
+      await optimizePeerConnection(pc);
       if (!pc.localDescription) throw new Error("Missing local description");
 
       // Normalize RTCSessionDescription to plain object for consistent signing
