@@ -1,5 +1,6 @@
 import { p256 } from "@noble/curves/nist.js";
 import { bytesToHex, hexToBytes } from "@noble/curves/utils.js";
+import { sha256 as nobleSha256 } from "@noble/hashes/sha2.js";
 
 /**
  * Deterministic JSON serialization - ensures same object always produces same string
@@ -224,9 +225,21 @@ export function importHostPublicKey(publicKeyString: string): { x: bigint; y: bi
 
 /**
  * Hash a message using SHA-256
+ * Falls back to @noble/hashes when crypto.subtle is not available (e.g., HTTP contexts)
  */
 async function sha256(message: Uint8Array): Promise<Uint8Array> {
-  return new Uint8Array(await crypto.subtle.digest("SHA-256", message));
+  // Check if crypto.subtle is available (requires secure context: HTTPS or localhost)
+  if (typeof crypto !== "undefined" && crypto.subtle && crypto.subtle.digest) {
+    try {
+      return new Uint8Array(await crypto.subtle.digest("SHA-256", message));
+    } catch (error) {
+      // If crypto.subtle fails, fall through to fallback
+      console.warn("[ECDSA] crypto.subtle.digest failed, using fallback:", error);
+    }
+  }
+  
+  // Fallback: use @noble/hashes (works in all contexts including HTTP)
+  return nobleSha256(message);
 }
 
 /**

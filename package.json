@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@noble/curves": "^2.0.1",
+    "@noble/hashes": "^2.0.1",
     "@supabase/supabase-js": "^2.81.1",
     "react": "^19",
     "react-dom": "^19",
