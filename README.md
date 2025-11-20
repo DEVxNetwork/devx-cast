@@ -60,3 +60,12 @@ The application uses two tables:
 - `answers`: WebRTC answer SDP linked to an offer
 
 See `supabase-schema.sql` for the complete schema definition.
+
+## GitHub Pages Deployment
+
+The app automatically deploys to GitHub Pages on push to `main`. Configure these secrets in **Settings → Secrets and variables → Actions**:
+
+- `BUN_PUBLIC_SUPABASE_URL` - Your Supabase project URL (from Settings → API)
+- `BUN_PUBLIC_SUPABASE_ANON_KEY` - Your Supabase anon key (from Settings → API)
+
+Enable GitHub Pages in repository settings and select "GitHub Actions" as the source.
