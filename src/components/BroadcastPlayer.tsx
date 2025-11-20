@@ -25,8 +25,12 @@ export function BroadcastPlayer({ stream, peerLabel, peerScreenTitle }: Broadcas
         <>
           <video ref={videoRef} autoPlay playsInline muted controls />
           <div className="broadcast-info">
-            <p className="broadcast-title">{peerLabel}</p>
-            <p className="broadcast-subtitle">{peerScreenTitle}</p>
+            {peerLabel != null && peerLabel !== "" && (
+              <p className="broadcast-title">{peerLabel}</p>
+            )}
+            {peerScreenTitle != null && peerScreenTitle !== "" && (
+              <p className="broadcast-subtitle">{peerScreenTitle}</p>
+            )}
           </div>
         </>
       ) : (

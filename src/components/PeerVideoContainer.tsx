@@ -29,7 +29,7 @@ export function PeerVideoContainer({ peerId, stream, label, onVideoRef }: PeerVi
       {stream ? (
         <video ref={videoRef} autoPlay playsInline muted controls />
       ) : (
-        <span>{label}</span>
+        <span>{label ?? ""}</span>
       )}
     </div>
   );

@@ -9,7 +9,7 @@ export function StatItem({ label, value, valueStyle }: StatItemProps) {
     <div className="stat">
       <p className="label stat-label">{label}</p>
       <span className="stat-value" style={valueStyle}>
-        {value}
+        {value ?? ""}
       </span>
     </div>
   );
