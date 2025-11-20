@@ -1,4 +1,4 @@
-# WebRTC Screen Share with Supabase
+# DEVxCast
 
 A WebRTC-based screen sharing application that uses Supabase for signaling between casters and presenters.
 
