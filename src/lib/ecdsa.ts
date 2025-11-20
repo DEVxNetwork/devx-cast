@@ -101,6 +101,7 @@ function pkcs8ToPrivateKey(pkcs8Bytes: Uint8Array): bigint {
   offset++; // skip version
   if (pkcs8Bytes[offset++] !== 0x04) throw new Error("Invalid PKCS#8 format");
   const keyLength = pkcs8Bytes[offset++];
+  if (keyLength === undefined) throw new Error("Invalid PKCS#8 format: missing key length");
   
   const keyBytes = pkcs8Bytes.slice(offset, offset + keyLength);
   return BigInt("0x" + bytesToHex(keyBytes));
@@ -231,7 +232,14 @@ async function sha256(message: Uint8Array): Promise<Uint8Array> {
   // Check if crypto.subtle is available (requires secure context: HTTPS or localhost)
   if (typeof crypto !== "undefined" && crypto.subtle && crypto.subtle.digest) {
     try {
-      return new Uint8Array(await crypto.subtle.digest("SHA-256", message));
+      // Ensure we have a proper ArrayBuffer (not SharedArrayBuffer) for crypto.subtle
+      // Create a copy if needed to ensure we have a regular ArrayBuffer
+      const buffer = message.buffer instanceof SharedArrayBuffer
+        ? message.slice().buffer
+        : message.byteOffset === 0 && message.byteLength === message.buffer.byteLength
+        ? message.buffer
+        : message.slice().buffer;
+      return new Uint8Array(await crypto.subtle.digest("SHA-256", buffer));
     } catch (error) {
       // If crypto.subtle fails, fall through to fallback
       console.warn("[ECDSA] crypto.subtle.digest failed, using fallback:", error);
